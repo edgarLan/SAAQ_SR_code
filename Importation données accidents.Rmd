@@ -20,10 +20,12 @@ dirs <- c("Brutes", "Brutes/web", "Brutes/web/cancensus", "Brutes/web/osm",
           "Brutes/Debit Qc/cir_v_geo_sectn_trafc_locls", 
           "Brutes/Debit Qc/Débits Tarcisio", 
           "Brutes/Frontieres administratives/Quebec",
-          "Brutes/collisions_routieres_MTL_SHP")
+          "Brutes/collisions_routieres_MTL_SHP",
+          "Brutes/misc")
 
 # Créer les répertoires
 lapply(file.path(path, dirs), dir.create, recursive = TRUE, showWarnings = FALSE)
+
 ```
 
 
