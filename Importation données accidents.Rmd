@@ -1,0 +1,140 @@
+---
+title: "Nouvelles Données"
+author: "Edgar Lanoue"
+date: "2023-08-25"
+output: 
+  html_document : 
+    code_folding: hide
+    toc_depth: 6
+editor_options: 
+  chunk_output_type: console
+---
+
+# Création du répertoire Données
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre/Donnees"
+
+# Liste complète des dossiers à créer
+dirs <- c("Brutes", "Brutes/web", "Brutes/web/cancensus", "Brutes/web/osm", 
+          "Traitees", "Brutes/CMM/occ", "Brutes/CMM/ram", 
+          "Brutes/Debit Qc/cir_v_geo_sectn_trafc_locls", 
+          "Brutes/Debit Qc/Débits Tarcisio", 
+          "Brutes/Frontieres administratives/Quebec",
+          "Brutes/collisions_routieres_MTL_SHP")
+
+# Créer les répertoires
+lapply(file.path(path, dirs), dir.create, recursive = TRUE, showWarnings = FALSE)
+```
+
+
+
+# Données géolocalisées d'accidents Mtl
+Ces données sont publiques!
+Séparation des accidents selon leur gravité, et ajout d'un indicateur COVID-19 après le 13 mars 2020.
+```{r}
+mtl <- read_sf(dsn =file.path(pathBrutes, "collisions_routieres_MTL_SHP"))
+
+mtl <- mtl %>%
+  mutate(ind_covid = ifelse(DT_ACCDN > date("2020-03-13"), 1,0)) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN > date("2020-03-13"), "Post-Covid", "Pre-Covid")) #%>%
+  # filter(AN>=2015)
+mtl <- st_transform(mtl, projUTM)
+
+mtl_M <- mtl %>% filter(GRAVITE=="Mortel")
+mtl_G <- mtl %>% filter(GRAVITE=="Grave")
+mtl_L <- mtl %>% filter(GRAVITE=="Léger")
+
+save(mtl_M, file = file.path(pathTraitees, "mtl_M.Rda"))
+save(mtl_G, file = file.path(pathTraitees, "mtl_G.Rda"))
+save(mtl_L, file = file.path(pathTraitees, "mtl_L.Rda"))
+
+```
+
+Comme les données d'accidents ne sont pas publiques, ce code ne peut être reproduit.
+
+```{r}
+pathIn <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données"
+pathOut <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre/Données/Bruts"
+```
+
+
+## Lecture des données d'accidents
+```{r}
+an <- c(2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022)
+
+data_acc <- NULL
+
+# données des accidents la SAAQ
+for (i in an) {
+  temp <-  read.csv(paste(paste(pathIn, "/Accidents/Accidents_", sep=""), i, "_v20230713.csv", sep=""))
+  data_acc <- rbind(data_acc, temp)
+  print(i)
+}
+
+save(data_acc, file = paste(pathOut, "/data_acc.Rda", sep=""))
+
+dim(data_acc)
+```
+
+
+ 
+Si jamais on voulait utiliser les autres données de la SAAQ
+## Lecture des données d'infractions CC
+```{r}
+# data_inf_CC <- NULL
+# 
+# for (i in an[-12]) {
+#   temp <-  read.csv(paste("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/Infractions CC/Infractions_CC_", i, "_v20230713.csv", sep=""))
+#   data_inf_CC <- rbind(data_inf_CC, temp)
+# }
+# 
+# save(data_inf_CC, file = "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/data_inf_CC.Rda")
+```
+
+Pas les données de 2022!
+
+## Lecture des données d'infractions CSR
+```{r}
+# data_inf_CSR <- NULL
+# 
+# for (i in an[-12]) {
+#   temp <-  read.csv(paste("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/Infractions CSR/Infractions_CSR_", i, "_v20230713.csv", sep=""))
+#   data_inf_CSR <- rbind(data_inf_CSR, temp)
+# }
+# 
+# save(data_inf_CSR, file = "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/data_inf_CSR.Rda")
+```
+
+#### Lecture des données de flotte de véhicules
+```{r}
+# library(dplyr)
+# 
+# data_flotte <- NULL
+# 
+# for (i in an) {
+#   print(i)
+#   temp <-  read.csv(paste("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/Flotte/VEHICULES_", i, "_12.csv", sep=""))
+#   data_flotte <- bind_rows(data_flotte, temp)
+# }
+# 
+# save(data_flotte, file = "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/data_flotte.Rda")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

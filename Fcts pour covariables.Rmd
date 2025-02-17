@@ -1,0 +1,593 @@
+---
+title: "Fcts pour covariables"
+author: "Edgar Lanoue"
+date: "2024-05-15"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre/"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+```
+
+
+# Importation Cancensus pour municipalités et MRC
+```{r}
+qc_bb <- getbb("Quebec")
+mtl_bb <- getbb("Montreal")
+
+# Polygone de la province du Qc
+qc_poly <- getbb(place_name = "Quebec", format_out = "polygon", limit=1)
+
+# Le premier de la liste est effectivement la province, les autres sont des iles loin au Nord
+  qc_poly <- st_polygon(list(qc_poly[[1]]))
+  qc_poly <- st_sf(geometry = st_sfc(qc_poly), crs = crs)
+
+mtl_poly <- read_sf(file.path(pathBrutesWeb, "cancensus", "mtl_poly.shp"))
+# mtl_poly
+mtl_poly <- st_transform(mtl_poly, crs = projUTM)
+
+# Sépare les 4 îles en différents polygones
+mtlpoly_4 <- st_cast(mtl_poly, "POLYGON")
+mtlIle_mesh <- inla.mesh.2d(boundary = mtlpoly_4, max.edge = 2, cutoff = 1, crs=projUTM)  
+# plot(mtlIle_mesh)
+```
+
+# Fonctions
+## Fonction qui retroune longueur de routes, en séparant par type de route, pour une région
+```{r}
+longRoutes <- function(routes, reg){
+  int <- st_intersects(reg, routes)
+  intersect <- st_intersection(routes[int[[1]],], reg)
+  if (dim(intersect)[1] > 0){
+    df <- intersect %>% group_by(highway) %>%
+    summarise(longueur = as.numeric(sum(st_length(geometry))))
+    df2 <- data.frame(highway=c(unique(routes$highway)))
+    df <- left_join(df2,df)
+    df$longueur[is.na(df$longueur)] <- 0
+  } else {
+    len <- length(unique(routes$highway))
+    df <- data.frame(highway = c(unique(routes$highway)), longueur=rep(0, len), geometry=rep(st_geometry(st_linestring()),len))
+    df <- st_as_sf(df, crs=st_crs(reg))
+  }
+  return (df)
+}
+```
+
+### Fonction qui retourne les longueur de routes pour plusieurs régions
+```{r}
+longRoutes_df <- function(routes, regs, nom_var){
+  n <- length(unique(routes$highway)) 
+  nx <- n*dim(regs)[1]
+  df <- tibble(highway = rep(NA, nx), longueur = rep(NA, nx), geometry = rep(NA, nx), code = rep(NA, nx))
+  for (i in (1:dim(regs)[1])){
+    code <- as.numeric(st_drop_geometry(regs[nom_var])[i,])
+    temp <- longRoutes(routes, regs[i,])
+    temp$code <- rep(code, n)
+    df[(n*(i-1)+1):(n*i),] <- temp
+    print(i)
+  }
+  return (df)
+}
+```
+
+## Fonction qui retourne le nombre de points (provenant d'une covariable) dans un rayon r d'un point donné en entrée. Une liste de points peut être donnée en entrée.
+```{r}
+compte_spatial <- function(loc_sf, cov_sf, rayon, nQuadSegs){
+  # Rendre les objets sf en spdf car le fonction point2count() a besoin de spdf en entrée
+  cov_spdf <- as_Spatial(cov_sf)
+  loc_buffer <- as_Spatial(st_buffer(loc_sf, rayon, nQuadSegs)) # st_buffer() augmente les points en disque de rayon rayon.
+  # Fonction point2count() du package inlabru - compte les points sur des surfaces
+  p2c <- point2count(loc_buffer, cov_spdf)
+  return(p2c)
+}
+
+# verif 
+#   mtl_fC <- read_sf("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/osm/intersections/mtl_fC.shp")
+#   mtl_fC <- st_transform(mtl_fC, projUTM)
+#   aEval_sf <- st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM)
+#   tic()
+#   test.2 <- compte_spatial(aEval_sf, mtl_fC, 0.325, 100)
+#   toc()
+#   test.2$n
+# } 
+```
+
+## Fonction retournant un compte total par région (municipalités ou MRC). 
+```{r}
+compte_region <- function(regions_sf, cov_sf, nom_var){
+  # Déclaration d'un df avec toutes les régions (les codes des régions)
+  df_reg <- as_tibble(data.frame(joinVar = unique(st_drop_geometry(regions_sf[nom_var]))))
+  df_reg[[nom_var]] <- as.factor(df_reg[[nom_var]])
+  # Intersection entre les points (covariables) et régions
+  join_cov <- st_join(cov_sf, regions_sf, join = st_intersects)
+  # Nombre par régions
+  tab_jC <- as.data.frame(table(st_drop_geometry(join_cov[nom_var])))
+  join_cov_comp <- right_join(tab_jC, df_reg)
+  colnames(join_cov_comp)[2] <- "cov"
+  join_cov_comp$cov[is.na(join_cov_comp$cov)] <- 0
+  return(join_cov_comp)
+}
+
+# verif 
+#   qc_fC <- read_sf("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/osm/intersections/qc_fC.shp")
+#   
+#   tic()
+#   test <- compte_region(qc_muncp, qc_fC, "MUS_CO_GEO")
+#   toc()
+#     # Ne prend que 9 secondes pour les municipalités (1345 polygones) - très raisonnable
+#   
+#   # Vérifications
+#   sum(test$cov) == dim(qc_fC)[1] # Normal car on a enlevé des muncp
+#   
+#   tic()
+#   test2 <- compte_region(qc_mrc, qc_fC, "MRS_CO_MRC")
+#   toc()
+#     # Ne prend que 9 secondes pour les municipalités (1345 polygones) - très raisonnable
+#   
+#   # Vérifications
+#   sum(test2$cov) == dim(qc_fC)[1] # Confirmation!
+
+```
+
+## Fonction qui retourne la proportion de zone d'un type (commercial, résidentiel) dans un rayon autour d'un point
+```{r}
+load(file.path(pathTraitees, "occRes.Rda"))
+load(file.path(pathTraitees, "occIndComm.Rda"))
+
+pt <- st_geometry(st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM))[19]
+pts <- st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM)
+
+# Union pour ne garder qu'une géométrie
+occRes_union <- st_union(occRes)
+occIndComm_union <- st_union(occIndComm)
+
+# Sépare les polygones qui ne se touchent pas
+occRes_poly <- occRes_union %>%  st_cast("POLYGON") %>% 
+  st_sf()
+occIndComm_poly <- occIndComm_union %>%  st_cast("POLYGON") %>% 
+  st_sf()
+
+# Importation de sous-régions de l'île de Mtl
+load(file.path(pathTraitees, "mtl_cc_cov_CT.Rda"))
+# Création de jdD où l'on associe les sous-régions mtlaises à des zones
+mtl_cc_cov_CT_idx <- mtl_cc_cov_CT %>% mutate(idx=1:dim(mtl_cc_cov_CT)[1]) %>% select(idx) %>% st_intersection(mtl_poly)
+occRes_join <- st_join(occRes_poly %>% mutate(ID=1:dim(occRes_poly)[1]) %>% select(ID), mtl_cc_cov_CT_idx)
+occIndComm_join <- st_join(occIndComm_poly %>% mutate(ID=1:dim(occIndComm_poly)[1]) %>% select(ID), mtl_cc_cov_CT_idx)
+
+
+
+
+# Fonction qui retourne la proportion de zone dans un polygone
+
+pt <- st_sfc(pt)
+pt <- st_set_crs(pt, projUTM)
+buf_pt <- st_buffer(pt, dist=0.325)
+buf_pt <- st_intersection(buf_pt, mtl_poly)
+
+propSol_join <- function(buf, cmm_polyJoin){
+  buf <- st_sfc(buf)
+  buf <- st_set_crs(buf, projUTM)
+  
+  id <- st_join(st_sf(buf), mtl_cc_cov_CT %>% mutate(idx=1:dim(mtl_cc_cov_CT)[1])) %>% select(idx)
+cmm_filter <- cmm_polyJoin %>% filter((idx) %in% id$idx) %>% st_difference()
+inter <- st_intersection(buf, cmm_filter)
+  areaInter <- st_area(inter)
+  areaBuf <- st_area(buf)
+  # print(sum(areaInter))
+  # tic()
+  if (is_empty(areaInter)||is_empty(areaInter)) {
+    val = 0
+    } else {
+  val <- sum(areaInter) / sum(areaBuf)
+    }
+  # toc()
+  return(val)
+}
+
+# Vielles fonctions plus lentes
+propSol <- function(pt, cmm_union, rayon){
+  # tic()
+  pt <- st_sfc(pt)
+  pt <- st_set_crs(pt, projUTM)
+  buf <- st_buffer(pt, dist=rayon)
+  buf <- st_intersection(buf, mtl_poly)
+  # toc()
+  inter <- st_intersection(buf, cmm_union)
+  # toc()
+  areaInter <- st_area(inter)
+  areaBuf <- st_area(buf)
+  # tic()
+  if (is_empty(areaInter)||is_empty(areaInter)) {
+    val = 0
+    } else {
+  val <- sum(areaInter) / sum(areaBuf)
+    }
+  # toc()
+  return(val)
+}
+propSol_buf <- function(buf, cmm_union){
+  buf <- st_sfc(buf)
+  buf <- st_set_crs(buf, projUTM)
+  inter <- st_intersection(buf, cmm_union)
+  
+  areaInter <- st_area(inter)
+  areaBuf <- st_area(buf)
+  # print(sum(areaInter))
+  # tic()
+  if (is_empty(areaInter)||is_empty(areaInter)) {
+    val = 0
+    } else {
+  val <- sum(areaInter) / sum(areaBuf)
+    }
+  # toc()
+  return(val)
+}
+
+# Verif
+  # tic()
+  # propSol_join(buf_pt, occRes_join)
+  # toc()
+  # 
+  # tic()
+  # propSol(pt, occRes_poly, 0.325)
+  # toc()
+  # 
+  # tic()
+  # propSol_buf(buf_pt, occRes_poly)
+  # toc()
+
+# Fonction qui retourne les proportion de zone pour une liste de polygones
+prop_zone_join <- function(pts, cmm_union, rayon){
+  buf_poly <- st_buffer(st_geometry(pts), rayon)
+  buf_poly <- st_intersection(buf_poly, mtl_poly)
+  result <- as.numeric(lapply(buf_poly, propSol_join, cmm_polyJoin=cmm_union))
+  return(result)
+}
+
+# Vieilles fcts
+prop_zone <- function(pts, cmm_union, rayon){
+  result <- as.numeric(lapply(st_geometry(pts), propSol, cmm_union=cmm_union, rayon=rayon))
+  return(result)
+}
+
+prop_zone_buf <- function(pts, cmm_union, rayon){
+  buf_poly <- st_buffer(st_geometry(pts), rayon)
+  buf_poly <- st_intersection(buf_poly, mtl_poly)
+  result <- as.numeric(lapply(buf_poly, propSol_buf, cmm_union=cmm_union))
+  return(result)
+}
+
+# Verif
+  pts[1:10,]
+  # mapview(pts[1:10,])
+  # 
+  # tic()
+  # test1 <- prop_zone(pts[1:10,], occRes_poly, 0.325)
+  # toc()
+  # 
+  # tic()
+  # test2 <- prop_zone_buf(pts[1:10,], occRes_poly, 0.325)
+  # toc()
+  # 
+  # tic()
+  # test3 <- prop_zone_join(pts[1:10,], occRes_join, 0.325)
+  # toc()
+  # 
+  # table(test1==test2)
+  # table(test2==test3)
+
+```
+
+
+
+# AREAL - Traitement covariables
+
+```{r}
+# Shapefile Régions - de cancensus car couvre efffectivement tout le Qc
+load(file.path(pathTraitees, "qc_muncp_cc.Rda"))
+load(file.path(pathTraitees, "qc_mrc_cc.Rda"))
+# mapview(qc_muncp_cc)
+
+# Routes
+qc_route <- st_read(file.path(pathBrutes, "Débit Qc",  "cir_v_geo_sectn_trafc_locls/cir_v_geo_sectn_trafc_locls.shp"))
+qc_route <- qc_route %>% select(geometry)
+qc_route <- st_transform(qc_route, crs)
+qc_route$highway <- "Débit"
+qc_route$osm_id <- NA
+qc_mw <- read_sf(file.path(pathBrutesWeb,"osm" ,"routes", "qc_mw.shp"))
+qc_tr <- read_sf(file.path(pathBrutesWeb,"osm" ,"routes", "qc_tr.shp"))
+qc_pr <- read_sf(file.path(pathBrutesWeb,"osm" ,"routes", "qc_pr.shp"))
+qc_sec <- read_sf(file.path(pathBrutesWeb,"osm" ,"routes", "qc_sec.shp"))
+qc_ter <- read_sf(file.path(pathBrutesWeb, "osm" ,"routes", "qc_ter.shp"))
+
+# Intersections
+mtl_fC <- read_sf(file.path(pathBrutesWeb, "osm", "intersections", "mtl_fC.shp"))
+mtl_stop <- read_sf(file.path(pathBrutesWeb, "osm", "intersections", "mtl_stop.shp"))
+mtl_link_ct <- read_sf(file.path(pathBrutesWeb, "osm", "intersections", "mtl_link_ct.shp"))
+mtl_fC <- st_transform(mtl_fC, projUTM)
+mtl_stop <- st_transform(mtl_stop, projUTM)
+
+qc_fC <- read_sf(file.path(pathBrutesWeb, "osm", "intersections", "qc_fC.shp"))
+qc_stop <- read_sf(file.path(pathBrutesWeb, "osm", "intersections", "qc_stop.shp"))
+qc_link_ct <- read_sf(file.path(pathBrutesWeb, "osm", "intersections", "qc_link_ct.shp"))
+
+# Hôpital
+qc_hosp <- read_sf(file.path(pathBrutesWeb, "osm", "autres", "qc_hosp.shp"))
+
+# Occupation du sol
+load(file.path(pathTraitees, "occRes.Rda"))
+load(file.path(pathTraitees, "occIndComm.Rda"))
+load(file.path(pathTraitees, "ram.Rda"))
+```
+
+## Sommes des routes par municipalités
+```{r}
+# # Verif
+# longRoutes(rbind(qc_mw, qc_tr, qc_route), qc_muncp[1,])
+# longRoutes(rbind(qc_mw, qc_tr, qc_route), qc_muncp[2,])
+# longRoutes_df(rbind(qc_mw, qc_tr, qc_route), qc_muncp[1:2,], "MUS_CO_GEO")
+# test <- longRoutes_df(rbind(qc_mw, qc_tr, qc_route), qc_muncp[100:110,], "MUS_CO_GEO")
+# dim(qc_muncp)
+mapview(qc_route) + mapview(qc_mw, color="red") + mapview(qc_tr, color="yellow") + mapview(qc_pr, color= "green") + mapview(qc_sec, color= "pink") + mapview(qc_ter, color= "orange")
+
+
+
+
+# Avec debit, motorway, trunk
+tic()
+muncp_routes <- longRoutes_df(rbind(qc_mw, qc_tr, qc_route, qc_pr, qc_sec, qc_ter), qc_muncp_cc, "CD_MUN")
+toc()
+# 7700 sec
+
+
+save(muncp_routes, file = file.path(pathTraitees, "muncp_routes.Rda"))
+
+load(file = file.path(pathTraitees, "muncp_routes.Rda"))
+
+# # Verif
+# sum(muncp_routes$longueur[muncp_routes$highway=="Débit"])
+# sum(st_length(qc_route$geometry))
+# # acceptable - surtout qu'on a retiré des municipalités dans l'alignements cancensus et off
+
+############## MRC ###################
+
+# # Avec debit, motorway, trunk
+tic()
+mrc_routes <- longRoutes_df(rbind(qc_mw, qc_tr, qc_route, qc_pr, qc_sec, qc_ter), qc_mrc_cc, "CD_MRC")
+toc()
+# 630 sec
+
+save(mrc_routes, file = file.path(pathTraitees, "mrc_routes.Rda"))
+load(file.path(pathTraitees, "mrc_routes.Rda"))
+
+# # Verif
+# sum(mrc_routes$longueur[mrc_routes$highway=="Débit"])
+# sum(st_length(qc_route$geometry))
+# # logique que ce soit très très proche
+# 
+# mapview(qc_route) + mapview(st_as_sf(mrc_routes[mrc_routes$highway=="Débit",]), color="red") + mapview(qc_mrc, col.regions="green")
+```
+
+## Intersections par municipalités et MRC
+```{r}
+tic()
+fC_muncp <- compte_region(qc_muncp_cc, qc_fC, "CD_MUN")
+stop_muncp <- compte_region(qc_muncp_cc, qc_stop, "CD_MUN")
+link_muncp <- compte_region(qc_muncp_cc, qc_link_ct, "CD_MUN")
+toc() # 35 sec
+
+tic()
+fC_mrc <- compte_region(qc_mrc_cc, qc_fC, "CD_MRC")
+stop_mrc <- compte_region(qc_mrc_cc, qc_stop, "CD_MRC")
+link_mrc <- compte_region(qc_mrc_cc, qc_link_ct, "CD_MRC")
+toc() # 16 sec
+
+# Verif
+# dim(qc_fC)[1]
+# sum(fC_muncp$cov)
+# dim(qc_stop)[1]
+# sum(stop_muncp$cov)
+# dim(qc_link_ct)[1]
+# sum(link_muncp$cov)
+# 
+# dim(qc_fC)[1]==sum(fC_mrc$cov)
+# dim(qc_stop)[1]==sum(stop_mrc$cov)
+# dim(qc_link_ct)[1]==sum(link_mrc$cov)
+# Logique que F, car avec les cours d'eau, on perd p-ê quelques points
+
+save(fC_muncp, file = file.path(pathTraitees, "fC_muncp.Rda"))
+save(stop_muncp, file = file.path(pathTraitees, "stop_muncp.Rda"))
+save(link_muncp, file = file.path(pathTraitees, "link_muncp.Rda"))
+
+save(fC_mrc, file = file.path(pathTraitees, "fC_mrc.Rda"))
+save(stop_mrc, file = file.path(pathTraitees, "stop_mrc.Rda"))
+save(link_mrc, file = file.path(pathTraitees, "link_mrc.Rda"))
+```
+
+
+## Hôpital par muncp et MRC
+
+```{r}
+tic()
+hosp_muncp <- compte_region(qc_muncp_cc, qc_hosp, "CD_MUN")
+hosp_mrc <- compte_region(qc_mrc_cc, qc_hosp, "CD_MRC")
+toc() # 10 sec
+
+# Vérif
+# sum(hosp_muncp$cov)
+# sum(hosp_mrc$cov)
+# length(st_intersects(qc_poly, qc_hosp)[[1]])
+
+
+save(hosp_muncp, file = file.path(pathTraitees, "hosp_muncp.Rda"))
+save(hosp_mrc, file = file.path(pathTraitees, "hosp_mrc.Rda"))
+```
+
+
+# SPP - Traitement covariables
+
+Éventuellement, le but serait de faire une grille de Mtl assez raffiné, avec tout défini à chaque 100m, et on utiliserait eval_spatial() et bru_fill_missing() pour remplir tous les jdD.
+
+Pour l'instant faisons un exemple avec le mesh de Mtl suivant et les accidents mortels ayant eu lieu à Mtl:
+```{r}
+load(file.path(pathTraitees, "mtl_M.Rda"))
+
+mapview(st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM), cex=2) + mapview(mtl_M, col.regions="red", cex=2)
+
+pts <- rbind(st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM) %>% select(geometry), mtl_M %>% select(geometry))
+
+intersects <- st_intersects(st_buffer(pts, 0.325), mtl_poly)
+
+ptAEnlever <- which(as.matrix(intersects)==F, as.matrix(intersects))
+mapview(pts[ptAEnlever,])
+pts <- pts[-ptAEnlever,]
+mapview(pts, cex=2) + mapview(mtl_M, col.regions="red", cex=2)
+
+unique(mtl_M$AN)
+dim(mtl_M)
+
+mapview(pts[c(326, 194),]) + mapview(pts[515,], col.regions="red")
+```
+
+Pour tous ces points, il faut extraire les covariables suivantes :
+  intersections
+    fC
+    stop
+    link
+  hopital
+  routes
+    rma
+  occupation du sol
+  
+## Somme de points autour du point d'intérêt
+Rayon de 325m
+```{r}
+mtl_fC <- st_transform(mtl_fC, projUTM)
+mtl_stop <- st_transform(mtl_stop, projUTM)
+mtl_link_ct <- st_transform(mtl_link_ct, projUTM)
+hosp <- st_transform(qc_hosp, projUTM)
+
+tic()
+fC <- compte_spatial(pts, mtl_fC, 0.325, 100)
+toc()
+tic()
+stop <- compte_spatial(pts, mtl_stop, 0.325, 100)
+toc()
+tic()
+link <- compte_spatial(pts, mtl_link_ct, 0.325, 100)
+toc()
+tic()
+hopit <- compte_spatial(pts, hosp, 0.325, 100)
+toc()
+
+
+ggplot(as_tibble(data.frame(fC=fC$n, stop=stop$n))) + 
+  geom_point(aes(x=fC, y=stop))
+table(is.na(stop$n))
+
+cor(fC$n, stop$n)
+```
+
+## Somme de longueur de routes autour d'un pt d'interet
+```{r}
+rayon=0.325
+colnames(ram)[3] <- "highway"
+
+longRoutes_df_aj <- function(routes, regs){
+  n <- length(unique(routes$highway)) 
+  nx <- n*dim(regs)[1]
+  df <- tibble(highway = rep(NA, nx), longueur = rep(NA, nx), geometry = rep(NA, nx))
+  for (i in (1:dim(regs)[1])){
+    temp <- longRoutes(routes, regs[i,])
+    df[(n*(i-1)+1):(n*i),] <- temp
+    # print(i)
+  }
+  return (df)
+}
+
+
+buf_poly <- st_buffer(pts, rayon)
+buf_poly <- st_intersection(buf_poly, mtl_poly)
+# mapview(st_sf(buf_poly))
+
+tic()
+routes_spp <- longRoutes_df_aj(ram, buf_poly)
+toc() # 156.12 pour 647 pts
+
+```
+
+  
+## Proportions des aires des zones alentours
+```{r}
+tic()
+propRes <- prop_zone_join(pts, occRes_join, 0.325)
+toc() # 120
+tic()
+propIndComm <- prop_zone_join(pts, occIndComm_join, 0.325)
+toc()
+```
+
+## Mettre ensemble 
+```{r}
+fC$n
+stop$n
+link$n
+hopit$n
+routes_1 <- routes_spp %>% filter(highway==1) %>% select(longueur) %>% st_drop_geometry()
+routes_2 <- routes_spp %>% filter(highway==2) %>% select(longueur) %>% st_drop_geometry()
+routes_3 <- routes_spp %>% filter(highway==3) %>% select(longueur) %>% st_drop_geometry()
+routes_ens <- routes_1$longueur + routes_2$longueur + routes_3$longueur
+routes_ens
+propRes
+propIndComm
+
+
+
+
+df_spp <- tibble(fC=fC$n, stop=stop$n, link=link$n, hopit=hopit$n, r1=routes_1$longueur, r2=routes_2$longueur, r3=routes_3$longueur, rEns=routes_ens, propRes=propRes, propIndComm=propIndComm)
+
+# Verif
+  # table(df_spp$rEns==df_spp$r1+df_spp$r2+df_spp$r3)
+
+
+
+save(df_spp, file = file.path(pathTraitees, "df_spp.Rda"))
+```
+
+
+
+
+
+

@@ -1,0 +1,175 @@
+---
+title: "Exportation Cancensus"
+author: "Edgar Lanoue"
+date: "2024-05-15"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+Package à inclure
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+```
+
+# Importation Cancensus pour municipalités et MRC
+```{r}
+qc_muncp_cc <- get_census(dataset='CA21', regions=list(PR="24"),
+                         level='CSD', quiet = TRUE,
+                         geo_format = 'sf', labels = "long")
+qc_muncp_cc <- st_transform(qc_muncp_cc, crs)
+qc_mrc_cc <- get_census(dataset='CA21', regions=list(CMA="24"),
+                         level='CD', quiet = TRUE,
+                         geo_format = 'sf', labels = "long")
+qc_mrc_cc <- st_transform(qc_mrc_cc, crs)
+
+st_write(qc_muncp_cc, paste(pathBrutesWeb, "/cancensus/qc_muncp_cc.shp", sep=""), append=FALSE)
+st_write(qc_mrc_cc, paste(pathBrutesWeb, "/cancensus/qc_mrc_cc.shp", sep=""), append=FALSE)
+
+
+# AVANT AJUSTEMENTS
+# qc_muncp_cc <- read_sf(paste(pathBrutesWeb, "/cancensus/qc_muncp_cc.shp", sep=""))
+# qc_mrc_cc <- read_sf(paste(pathBrutesWeb, "/cancensus/qc_mrc_cc.shp", sep=""))
+
+```
+
+# Variables possibles
+```{r}
+# vars <- list_census_vectors("CA21")
+```
+
+## Pour Montréal 
+
+```{r}
+tic()
+mtl_cc_cov_DA <- get_census(dataset='CA21', regions=list(CMA="2466"),
+                            vectors=c("Population_21"="v_CA21_1",
+                                      "moins_5Ans"="v_CA21_14",
+                                      "a15_19"="v_CA21_71",
+                                      "a20_24"="v_CA21_89",
+                                      "a65_plus"="v_CA21_251",
+                                      "femmes"="v_CA21_10",
+                                      "Bacc_plus"="v_CA21_5847",
+                                      "secondaire_moins"="v_CA21_6294",
+                                      "chomeurs"="v_CA21_6501",
+                                      "revenu_median_menage"="v_CA21_907",
+                                      "C19_benefits"="v_CA21_593",
+                                      "C19_benefits_percent"="v_CA21_659",
+                                      "popu_density"="v_CA21_6"
+                                      ),
+                            level='DA', quiet = TRUE, 
+                            geo_format = 'sf', labels = 'detailed')
+toc()
+tic()
+mtl_cc_cov_CT <- get_census(dataset='CA21', regions=list(CMA="2466"),
+                            vectors=c("Population_21"="v_CA21_1",
+                                      "moins_5Ans"="v_CA21_14",
+                                      "a15_19"="v_CA21_71",
+                                      "a20_24"="v_CA21_89",
+                                      "a65_plus"="v_CA21_251",
+                                      "femmes"="v_CA21_10",
+                                      "Bacc_plus"="v_CA21_5847",
+                                      "secondaire_moins"="v_CA21_6294",
+                                      "chomeurs"="v_CA21_6501",
+                                      "revenu_median_menage"="v_CA21_907",
+                                      "C19_benefits"="v_CA21_593",
+                                      "C19_benefits_percent"="v_CA21_659",
+                                      "popu_density"="v_CA21_6"
+                                      ),
+                            level='CT', quiet = TRUE, 
+                            geo_format = 'sf', labels = "detailed")
+toc()
+
+
+mtl_cc_cov_DA <- st_transform(mtl_cc_cov_DA, projUTM)
+mtl_cc_cov_CT <- st_transform(mtl_cc_cov_CT, projUTM)
+
+
+st_write(mtl_cc_cov_DA, file.path(pathBrutesWeb, "cancensus", "mtl_cc_cov_DA.shp"), append=FALSE)
+st_write(mtl_cc_cov_CT, file.path(pathBrutesWeb, "cancensus", "mtl_cc_cov_CT.shp"), append=FALSE)
+```
+
+
+## Québec
+
+```{r}
+tic()
+muncp_cc_cov <- get_census(dataset='CA21', regions=list(CMA="24"),
+                            vectors=c("Population_21"="v_CA21_1",
+                                      "moins_5Ans"="v_CA21_14",
+                                      "a15_19"="v_CA21_71",
+                                      "a20_24"="v_CA21_89",
+                                      "a65_plus"="v_CA21_251",
+                                      "femmes"="v_CA21_10",
+                                      "Bacc_plus"="v_CA21_5847",
+                                      "secondaire_moins"="v_CA21_6294",
+                                      "chomeurs"="v_CA21_6501",
+                                      "revenu_median_menage"="v_CA21_907",
+                                      "C19_benefits"="v_CA21_593",
+                                      "C19_benefits_percent"="v_CA21_659",
+                                      "popu_density"="v_CA21_6"
+                                      ),
+                            level='CSD', quiet = TRUE, 
+                            geo_format = 'sf', labels = "detailed")
+toc()
+
+tic()
+mrc_cc_cov <- get_census(dataset='CA21', regions=list(CMA="24"),
+                            vectors=c("Population_21"="v_CA21_1",
+                                      "moins_5Ans"="v_CA21_14",
+                                      "a15_19"="v_CA21_71",
+                                      "a20_24"="v_CA21_89",
+                                      "a65_plus"="v_CA21_251",
+                                      "femmes"="v_CA21_10",
+                                      "Bacc_plus"="v_CA21_5847",
+                                      "secondaire_moins"="v_CA21_6294",
+                                      "chomeurs"="v_CA21_6501",
+                                      "revenu_median_menage"="v_CA21_907",
+                                      "C19_benefits"="v_CA21_593",
+                                      "C19_benefits_percent"="v_CA21_659",
+                                      "popu_density"="v_CA21_6"
+                                      ),
+                            level='CD', quiet = TRUE, 
+                            geo_format = 'sf', labels = "detailed")
+toc()
+
+muncp_cc_cov <- st_transform(muncp_cc_cov, crs)
+mrc_cc_cov <- st_transform(mrc_cc_cov, crs)
+
+
+st_write(muncp_cc_cov, file.path(pathBrutesWeb, "cancensus", "muncp_cc_cov.shp"), append=FALSE)
+st_write(mrc_cc_cov, file.path(pathBrutesWeb, "cancensus", "mrc_cc_cov.shp"), append=FALSE)
+```
+
+
+
+
+

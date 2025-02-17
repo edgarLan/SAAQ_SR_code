@@ -1,0 +1,2116 @@
+---
+title: "Areal - jdD"
+author: "Edgar Lanoue"
+date: "2024-06-06"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Figures
+fig: correlation
+fig: diagMoran_nbAcc
+fig: acs local
+
+# Tableaux
+tab: osm_mun_resume
+tab: osm_mrc_resume
+tab: cancensus_mun_resume
+tab: cancensus_mrc_resume
+tab: moranGlob
+tab: moranLoc
+###########################
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+Packages à inclure
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+
+library(spdep)
+library(stargazer)
+
+library(ggpubr)
+library(viridis)
+```
+
+# Importation de tous les jdD
+
+```{r}
+# Données accidents
+load(file = file.path(pathTraitees, "data_acc.Rda"))
+
+# Routes
+load(file = file.path(pathTraitees, "muncp_routes.Rda"))
+load(file = file.path(pathTraitees, "mrc_routes.Rda"))
+
+# Intersections
+## Feu de circulation
+load(file = file.path(pathTraitees, "fC_muncp.Rda"))
+load(file = file.path(pathTraitees, "fC_mrc.Rda"))
+## Panneau d'arrêt
+load(file = file.path(pathTraitees, "stop_muncp.Rda"))
+load(file = file.path(pathTraitees, "stop_mrc.Rda"))
+## Feu de circulation
+load(file = file.path(pathTraitees, "link_muncp.Rda"))
+load(file = file.path(pathTraitees, "link_mrc.Rda"))
+
+# Hôpital
+load(file = file.path(pathTraitees, "hosp_muncp.Rda"))
+load(file = file.path(pathTraitees, "hosp_mrc.Rda"))
+
+# Cancensus
+load(file = file.path(pathTraitees, "muncp_cc_cov.Rda"))
+load(file = file.path(pathTraitees, "mrc_cc_cov.Rda"))
+
+# Voisinage
+load(file = file.path(pathTraitees, "nb_mun.Rda"))
+load(file = file.path(pathTraitees, "nb_mrc.Rda"))
+
+# SHP
+load(file = file.path(pathTraitees, "qc_muncp.Rda"))
+load(file = file.path(pathTraitees, "qc_mrc.Rda"))
+
+# Exposition
+load(file = file.path(pathTraitees, "djmaPopu_muncp.Rda"))
+load(file = file.path(pathTraitees, "djmaPopu_mrc.Rda"))
+load(file = file.path(pathTraitees, "vktPopu_muncp.Rda"))
+load(file = file.path(pathTraitees, "vktPopu_mrc.Rda"))
+```
+
+```{r}
+# muncp_routes[3,] %>% st_sf() %>% st_length()
+```
+
+# Ajustemetents data_acc
+
+```{r}
+data_acc <- data_acc %>% filter(an>=2014)
+
+# CD_GENRE_simp
+data_acc <- data_acc %>%  
+  mutate(CD_GENRE_ACCDN_simp = case_when(
+    CD_GENRE_ACCDN == 31 ~ "collision avec véhicule",
+    CD_GENRE_ACCDN == 32 ~ "collision avec piéton",
+    CD_GENRE_ACCDN == 33 ~ "collision avec cycliste",
+    CD_GENRE_ACCDN %in% c(35:37) ~ "collision avec animal",
+    CD_GENRE_ACCDN %in% c(40:55, 59) ~ "objet fixe",
+    CD_GENRE_ACCDN %in% c(71:75, 99) ~ "sans collision",
+    CD_GENRE_ACCDN %in% c(34,38,39) ~ "autre",
+    TRUE ~ NA_character_
+  )) 
+
+data_acc <- data_acc %>% 
+  mutate(indDispSecFautif = pmap_lgl(select(., starts_with("Dispositif")), 
+                                    ~ any(c(...) %in% c(1, 2, 4, 6, 8)))) %>%
+  mutate(indDispSecFautif = ifelse(indDispSecFautif==T, 1, 0))
+
+library(readxl)
+causes_def <- read_excel(file.path(pathBrutes, "misc", "changements noms.xlsx"), skip = 228)
+causes_def <- causes_def[1:55,3:5]
+colnames(causes_def) <- c("Catégorie", "Définition", "Catég. simplif.")
+
+summary_df <- causes_def %>%
+  group_by(`Catég. simplif.`) %>%
+  summarize(Définition = paste(Définition, collapse = ", "), .groups = 'drop')
+#stargazer(summary_df, summary = F, type="latex", rownames = F)
+
+
+data_acc <- left_join(data_acc, causes_def, by=join_by(CAUSE_1==Catégorie))
+data_acc <- data_acc %>% dplyr::rename(CAUSE_SIMPLIF = `Catég. simplif.`)
+data_acc$points <- ifelse(is.na(data_acc$points), 0, data_acc$points)
+
+# vitesse permise - remplacer par moyenne par (An, gravite) si NA
+dA_vit <- data_acc %>% group_by(an, gravite) %>% 
+  summarise(VITESSE_AUTOR=mean(VITESSE_AUTOR, na.rm=T)) #,
+            #points=mean(points)) 
+
+# Replacing NAs in df1 using values from df2
+data_acc <- data_acc %>%
+  left_join(dA_vit, by = c("an", "gravite"), suffix = c("", "_mean")) %>%
+  mutate(VITESSE_AUTOR = ifelse(is.na(VITESSE_AUTOR), VITESSE_AUTOR_mean, VITESSE_AUTOR)) %>%
+  select(-VITESSE_AUTOR_mean)
+
+# À retirer
+# CD_GENRE_ACC
+# Dispositif de sécurité!
+# CAUSE_1, CAUSE_2, Définition
+
+data_acc <- data_acc %>% 
+  select(-CD_GENRE_ACCDN, 
+         -CAUSE_1, 
+         -CAUSE_2, 
+         -Définition, 
+         -starts_with("Dispositif"),
+         -starts_with("FACTEUR"),
+         -NIV,
+         -NO_SUJET)
+
+save(data_acc, file=file.path(pathTraitees, "data_acc_maj.Rda"))
+
+table(data_acc$NB_VEH_IMPLIQUES_ACCDN==0)
+
+```
+
+
+Vérif
+```{r}
+# setdiff(muncp_cc_cov$CD_MUN, data_acc$CD_MUNCP)
+# setdiff(data_acc$CD_MUNCP, muncp_cc_cov$CD_MUN)
+# setdiff(mrc_cc_cov$CD_MRC, data_acc$MRC)
+# setdiff(data_acc$MRC, mrc_cc_cov$CD_MRC)
+```
+
+# Municipalité
+```{r}
+acc_PJ <- data_acc %>%
+  distinct(NO_SEQ_COLL, .keep_all = T) %>%
+  # mutate(An = year(DT_ACCDN)) %>%
+  # group_by(An, gravite, REG_ADM, MRC, CD_MUNCP) %>%
+  # mutate(vitesse_autor = replace_na(VITESSE_AUTOR, round(mean(VITESSE_AUTOR, na.rm = TRUE)))) %>%
+  # group_by(An, gravite) %>%
+  # mutate(vitesse_autor = replace_na(vitesse_autor, round(mean(VITESSE_AUTOR, na.rm = TRUE)))) %>%
+  group_by(DT_ACCDN, gravite, REG_ADM, MRC, CD_MUNCP) %>%
+  summarise(nbAcc = length(DT_ACCDN), 
+            nbMorts = sum(NB_MORTS), 
+            nbGraves=sum(NB_BLESSES_GRAVES),  
+            nbLegers=sum(NB_BLESSES_LEGERS), 
+            nbVeh=sum(NB_VEH_IMPLIQUES_ACCDN), 
+            nb1Veh=sum(NB_VEH_IMPLIQUES_ACCDN==1), 
+            nbVic=sum(NB_VICTIMES_TOTAL), 
+            nbVic_Piet=sum(NB_VICTIMES_PIETON), 
+            nbVic_Velo=sum(NB_VICTIMES_VELO), 
+            nbVic_Moto=sum(NB_VICTIMES_MOTO),
+            nbDec_Piet = sum(NB_DECES_PIETON), 
+            nbDec_Velo = sum(NB_DECES_VELO), 
+            nbDec_Moto = sum(NB_DECES_MOTO), 
+            nbDeces = sum(NB_MORTS), 
+            nbAcc_Piet = sum(NB_DECES_PIETON > 0 | (gravite=="Mortel" & NB_DECES_PIETON == 0 & NB_BLESSES_PIETON > 0)), 
+            nbAcc_Velo = sum(NB_DECES_VELO > 0 | (gravite=="Mortel" & NB_DECES_VELO == 0 & NB_BLESSES_VELO > 0)), 
+            nbAcc_Moto = sum(NB_DECES_MOTO > 0 | (gravite=="Mortel" & NB_DECES_MOTO == 0 & NB_BLESSES_MOTO > 0)),
+            nbAcc_UV_M = sum(NB_DECES_PIETON > 0 | (gravite=="Mortel" & NB_DECES_PIETON == 0 & NB_BLESSES_PIETON > 0) | NB_DECES_MOTO > 0 | (gravite=="Mortel" & NB_DECES_MOTO == 0 & NB_BLESSES_MOTO > 0) | NB_DECES_VELO > 0 | (gravite=="Mortel" & NB_DECES_VELO == 0 & NB_BLESSES_VELO > 0)),
+            nbBle_Piet = sum(NB_BLESSES_PIETON > 0),
+            nbBle_Velo = sum(NB_BLESSES_VELO > 0), 
+            nbBle_Moto = sum(NB_BLESSES_MOTO > 0),
+            nbBle_UV = sum(NB_BLESSES_PIETON > 0 | NB_BLESSES_VELO > 0 | NB_BLESSES_MOTO > 0),
+            nbDispSecFautif = sum(indDispSecFautif),
+            nb1Veh_UV = sum(NB_VEH_IMPLIQUES_ACCDN==1 & ((
+              NB_DECES_PIETON > 0 | (NB_DECES_PIETON > 0 | (gravite=="Mortel" & NB_DECES_PIETON == 0 & NB_BLESSES_PIETON > 0) | NB_DECES_MOTO > 0 | (gravite=="Mortel" & NB_DECES_MOTO == 0 & NB_BLESSES_MOTO > 0) | NB_DECES_VELO > 0 | (gravite=="Mortel" & NB_DECES_VELO == 0 & NB_BLESSES_VELO > 0))) | 
+               (gravite!="Mortel" & NB_BLESSES_PIETON > 0) | (gravite!="Mortel" & NB_BLESSES_VELO > 0) | (gravite!="Mortel" & NB_BLESSES_MOTO > 0)))
+            ) %>%
+            
+            # points = sum(points),
+            # vitesse_autor = sum(vitesse_autor),
+            # vitesse_autor = sum(VITESSE_AUTOR, na.rm=T)) %>%
+  mutate(An = year(DT_ACCDN))
+
+acc_PJ$gravite <- factor(acc_PJ$gravite, levels = c("Dommages matériels seulement", "Léger", "Grave", "Mortel"))
+```
+
+
+```{r}
+acc_PA_mun <- acc_PJ %>%
+  group_by(An, gravite, CD_MUNCP) %>%
+  summarise(nbAcc = sum(nbAcc))
+
+acc_PA_mun_sep <- acc_PA_mun %>%
+  group_by(An, gravite) %>%
+  group_split()
+
+acc_PA_mun_plus <- acc_PJ %>%
+  group_by(An, CD_MUNCP) %>%
+  summarise(nbAccTotal=sum(nbAcc), 
+            nbVic_Piet = sum(nbVic_Piet), 
+            nbVic_Velo = sum(nbVic_Velo), 
+            nbVic_Moto = sum(nbVic_Moto), 
+            nbVic=sum(nbVic)
+            # nb1Veh=sum(nb1Veh), 
+            # nbVeh=sum(nbVeh),
+            # nbAcc_Piet=sum(nbAcc_Piet),
+            # nbAcc_Velo=sum(nbAcc_Velo),
+            # nbAcc_Moto=sum(nbAcc_Moto)#,
+            # nbBle_Piet=sum(nbBle_Piet),
+            # nbBle_Velo=sum(nbBle_Velo),
+            # nbBle_Moto=sum(nbBle_Moto)
+            ) %>%
+  dplyr::rename(CD_MUN=CD_MUNCP) 
+
+acc_PA_mun_plusPlus <-  acc_PJ %>%
+  group_by(An, gravite, CD_MUNCP) %>%
+  summarise(nb1Veh=sum(nb1Veh), 
+            nbVehImpliqué=sum(nbVeh),
+            nbAcc_Piet_M = sum(nbAcc_Piet),
+            nbAcc_Velo_M = sum(nbAcc_Velo),
+            nbAcc_Moto_M = sum(nbAcc_Moto),
+            nbAcc_Piet_Ble = sum(nbBle_Piet),
+            nbAcc_Velo_Ble = sum(nbBle_Velo),
+            nbAcc_Moto_Ble = sum(nbBle_Moto),
+            nbAcc_UV_Ble = sum(nbBle_UV),
+            nbAcc_UV_M = sum(nbAcc_UV_M),
+            nbDispSecFautif = sum(nbDispSecFautif),
+            nb1Veh_UV = sum(nb1Veh_UV)
+            ) %>%
+  dplyr::rename(CD_MUN=CD_MUNCP) 
+
+dA_temp_mun <- data_acc %>%
+  group_by(an, gravite, CD_MUNCP) %>%
+  summarise(VITESSE_AUTOR=mean(VITESSE_AUTOR),
+            ptsTot = sum(points),
+            ptsMoy=mean(points),
+            nbConducteurs=length(DT_ACCDN)) %>%
+  dplyr::rename(CD_MUN = CD_MUNCP,
+         An = an)
+
+# table(is.na(dA_temp_mun$VITESSE_AUTOR))
+# table(is.na(dA_temp_mun$points))
+```
+
+```{r}
+df_muncp <- as_tibble(data.frame(CD_MUNCP = unique(muncp_cc_cov$CD_MUN)))
+n_mun <- length(unique(muncp_cc_cov$CD_MUN))
+n <- length(unique(muncp_cc_cov$CD_MUN)) * length(unique(acc_PA_mun$gravite)) * length(unique(acc_PA_mun$An))
+
+# Si on souhaite ajouter des variables : nom = rep(NA, n)
+df_complet <- data.frame(An = rep(NA, n), gravite = rep(NA, n), CD_MUNCP = rep(NA, n), nbAcc = rep(NA, n), MUS_CO_MRC = rep(NA, n), MUS_CO_REG = rep(NA, n))
+
+qc_mun_mrc <- muncp_cc_cov %>% select(CD_MUN, CD_MRC) %>% st_drop_geometry() %>% as_tibble()
+qc_mun_mrc_ra <- left_join(qc_mun_mrc, qc_muncp, by=join_by(CD_MUN==MUS_CO_GEO)) %>% select(CD_MUN, CD_MRC, MUS_CO_REG)
+qc_mun_mrc_ra$MUS_CO_REG <- as.numeric(qc_mun_mrc_ra$MUS_CO_REG)
+
+# verif
+  verif <- muncp_cc_cov %>% select(CD_MUN, CD_MRC, CD_rAdm) %>% st_drop_geometry()
+  table(qc_mun_mrc_ra==verif)
+
+colnames(qc_mun_mrc_ra)[3] <- "CD_RA"
+df_muncp <- merge(df_muncp, qc_mun_mrc_ra, by.x = "CD_MUNCP", by.y = "CD_MUN")
+compteur=1
+
+for (i in acc_PA_mun_sep) {
+  temp <- right_join(i, df_muncp)
+  temp[, 1:3] <- apply(temp[, 1:3], 2, function(x) zoo::na.locf(x, na.rm = FALSE, fromLast = TRUE))
+  temp[, 1:3] <- apply(temp[, 1:3], 2, function(x) zoo::na.locf(x, na.rm = FALSE, fromLast = FALSE))
+  temp$nbAcc <- ifelse(is.na(temp$nbAcc), 0, temp$nbAcc)
+  temp$CD_MUNCP <- as.numeric(temp$CD_MUNCP)
+  temp$CD_MRC <- as.numeric(temp$CD_MRC)
+  temp$CD_RA <- as.numeric(temp$CD_RA)
+  df_complet[((compteur-1)*n_mun+1):((compteur)*n_mun),] <- temp
+  print(compteur)
+  compteur = compteur+1
+}
+
+acc_PA <- tibble(df_complet)
+colnames(acc_PA)[which(names(acc_PA) %in% c("CD_MUNCP", "MUS_CO_MRC", "MUS_CO_REG"))] <- c("CD_MUN", "CD_MRC", "CD_RA")
+acc_PA$An <- as.numeric(acc_PA$An)
+
+acc_PA <- left_join(acc_PA, acc_PA_mun_plus)
+acc_PA <- left_join(acc_PA, acc_PA_mun_plusPlus)
+acc_PA$nbVic_Piet <- ifelse(is.na(acc_PA$nbVic_Piet), 0, acc_PA$nbVic_Piet)
+acc_PA$nbVic_Velo <- ifelse(is.na(acc_PA$nbVic_Velo), 0, acc_PA$nbVic_Velo)
+acc_PA$nbVic_Moto <- ifelse(is.na(acc_PA$nbVic_Moto), 0, acc_PA$nbVic_Moto)
+acc_PA$nbVic <- ifelse(is.na(acc_PA$nbVic), 0, acc_PA$nbVic)
+acc_PA$nb1Veh <- ifelse(is.na(acc_PA$nb1Veh), 0, acc_PA$nb1Veh)
+acc_PA$nbVehImpliqué <- ifelse(is.na(acc_PA$nbVehImpliqué), 0, acc_PA$nbVehImpliqué)
+acc_PA$nbAccTotal <- ifelse(is.na(acc_PA$nbAccTotal), 0, acc_PA$nbAccTotal)
+acc_PA <- left_join(acc_PA, dA_temp_mun)
+acc_PA$ptsMoy <- ifelse(is.na(acc_PA$ptsMoy), 0, acc_PA$ptsMoy)
+acc_PA$ptsTot <- ifelse(is.na(acc_PA$ptsTot), 0, acc_PA$ptsTot)
+acc_PA$nbConducteurs <- ifelse(is.na(acc_PA$nbConducteurs), 0, acc_PA$nbConducteurs)
+acc_PA$nbAcc_Piet_M <- ifelse(is.na(acc_PA$nbAcc_Piet_M), 0, acc_PA$nbAcc_Piet_M)
+acc_PA$nbAcc_Velo_M <- ifelse(is.na(acc_PA$nbAcc_Velo_M), 0, acc_PA$nbAcc_Velo_M)
+acc_PA$nbAcc_Moto_M <- ifelse(is.na(acc_PA$nbAcc_Moto_M), 0, acc_PA$nbAcc_Moto_M)
+acc_PA$nbAcc_Piet_Ble <- ifelse(is.na(acc_PA$nbAcc_Piet_Ble), 0, acc_PA$nbAcc_Piet_Ble)
+acc_PA$nbAcc_Velo_Ble <- ifelse(is.na(acc_PA$nbAcc_Velo_Ble), 0, acc_PA$nbAcc_Velo_Ble)
+acc_PA$nbAcc_Moto_Ble <- ifelse(is.na(acc_PA$nbAcc_Moto_Ble), 0, acc_PA$nbAcc_Moto_Ble)
+acc_PA$nbAcc_UV_Ble <- ifelse(is.na(acc_PA$nbAcc_UV_Ble), 0, acc_PA$nbAcc_UV_Ble)
+acc_PA$nbAcc_UV_M <- ifelse(is.na(acc_PA$nbAcc_UV_M), 0, acc_PA$nbAcc_UV_M)
+acc_PA$nbDispSecFautif <- ifelse(is.na(acc_PA$nbDispSecFautif), 0, acc_PA$nbDispSecFautif)
+acc_PA$nb1Veh_UV <- ifelse(is.na(acc_PA$nb1Veh_UV), 0, acc_PA$nb1Veh_UV)
+
+acc_PA <- acc_PA %>%
+  left_join(dA_vit, by = join_by(An==an, gravite==gravite), suffix=c("","_mean")) %>%
+  mutate(VITESSE_AUTOR = ifelse(is.na(VITESSE_AUTOR), VITESSE_AUTOR_mean, VITESSE_AUTOR)) %>%
+  select(-VITESSE_AUTOR_mean)
+
+acc_PA$nbAcc_Piet <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_Piet_M, acc_PA$nbAcc_Piet_Ble)
+acc_PA$nbAcc_Velo <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_Velo_M, acc_PA$nbAcc_Velo_Ble)
+acc_PA$nbAcc_Moto <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_Moto_M, acc_PA$nbAcc_Moto_Ble)
+
+acc_PA$nbAcc_UV <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_UV_M, acc_PA$nbAcc_UV_Ble)
+
+```
+
+Vérif
+```{r}
+# Verif
+# length(unique(acc_PA$CD_MUN))
+# length(unique(acc_PA$CD_MRC))
+# length(unique(acc_PA$CD_RA))
+# 
+# sum(acc_PA$nbAcc)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% dim()
+# 
+# sum(acc_PA$nbVic_Piet)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_PIETON) %>% sum()
+# sum(acc_PA$nbVic_Velo)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_VELO) %>% sum()
+# sum(acc_PA$nbVic_Moto)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_MOTO) %>% sum()
+# sum(acc_PA$nbVic)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_TOTAL) %>% sum()
+# sum(acc_PA$nb1Veh)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VEH_IMPLIQUES_ACCDN) %>% filter(NB_VEH_IMPLIQUES_ACCDN==1) %>% dim()
+# sum(acc_PA$nbVehImpliqué)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VEH_IMPLIQUES_ACCDN) %>% sum()
+# 
+# sum(acc_PA$VITESSE_AUTOR*acc_PA$nbConducteurs)
+# data_acc %>% select(VITESSE_AUTOR) %>% sum()
+# sum(acc_PA$ptsMoy*acc_PA$nbConducteurs)
+# data_acc %>% select(points) %>% sum()
+# sum(acc_PA$ptsTot)
+# data_acc %>% select(points) %>% sum()
+# sum(acc_PA$nbConducteurs)
+# data_acc %>% dim
+# 
+# sum(acc_PA$nbAcc_Piet_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA$nbAcc_Velo_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA$nbAcc_Moto_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Piet_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Velo_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Moto_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Piet_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Velo_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Moto_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# 
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_UV_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0 | NB_DECES_VELO>0 | NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_UV_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0, 1, 0)
+# ) %>% .$ind_ble %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_UV_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_bleDec = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0 | NB_DECES_PIETON>0 | NB_DECES_VELO>0 | NB_DECES_MOTO>0, 1, 0)
+# ) %>% .$ind_bleDec %>% sum
+# 
+# sum(acc_PA$nbDispSecFautif)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% .$indDispSecFautif %>% sum
+# 
+# 
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nb1Veh_UV)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nb1Veh_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>%
+#   mutate(ind = ifelse((NB_VICTIMES_PIETON > 0 |NB_VICTIMES_VELO > 0 |NB_VICTIMES_MOTO > 0) & NB_VEH_IMPLIQUES_ACCDN==1, 1, 0)) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nb1Veh_UV)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nb1Veh_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>%
+#   mutate(ind = ifelse((NB_VICTIMES_PIETON > 0 |NB_VICTIMES_VELO > 0 |NB_VICTIMES_MOTO > 0) & NB_VEH_IMPLIQUES_ACCDN==1, 1, 0)) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nb1Veh_UV)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nb1Veh_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>%
+#   mutate(ind = ifelse((NB_VICTIMES_PIETON > 0 |NB_VICTIMES_VELO > 0 |NB_VICTIMES_MOTO > 0) & NB_VEH_IMPLIQUES_ACCDN==1, 1, 0)) %>% .$ind %>% sum
+
+```
+
+
+
+```{r}
+as.double.factor <- function(x) {as.numeric(levels(x))[x]}
+
+muncp_routes <- muncp_routes %>% select(-geometry)
+mw_muncp <- muncp_routes %>% filter(highway=="motorway") %>% select(longueur, code) %>% dplyr::rename(motorway=longueur, CD_MUN=code)
+tr_muncp <- muncp_routes %>% filter(highway=="trunk") %>% select(longueur, code) %>% dplyr::rename(trunk=longueur, CD_MUN=code)
+pr_muncp <- muncp_routes %>% filter(highway=="primary") %>% select(longueur, code) %>% dplyr::rename(primary=longueur, CD_MUN=code)
+sec_muncp <- muncp_routes %>% filter(highway=="secondary") %>% select(longueur, code) %>% dplyr::rename(secondary=longueur, CD_MUN=code)
+ter_muncp <- muncp_routes %>% filter(highway=="tertiary") %>% select(longueur, code) %>% dplyr::rename(tertiary=longueur, CD_MUN=code)
+routeQc_muncp <- muncp_routes %>% filter(highway=="Débit") %>% select(longueur, code) %>% dplyr::rename(routeQc=longueur, CD_MUN=code)
+somme_osm_muncp <- tibble(sommeRoute=mw_muncp$motorway + tr_muncp$trunk + pr_muncp$primary + sec_muncp$secondary + ter_muncp$tertiary) %>% cbind(tibble(CD_MUN=mw_muncp$CD_MUN)) %>% tibble()
+
+fC_muncp <- fC_muncp %>% tibble() %>% dplyr::rename(fC=cov) %>% mutate(CD_MUN= as.double.factor(CD_MUN))
+stop_muncp <- stop_muncp %>% tibble() %>% dplyr::rename(stop=cov) %>% mutate(CD_MUN= as.double.factor(CD_MUN))
+link_muncp <- link_muncp %>% tibble() %>% dplyr::rename(link=cov) %>% mutate(CD_MUN= as.double.factor(CD_MUN))
+hosp_muncp <- hosp_muncp %>% tibble() %>% dplyr::rename(hosp=cov) %>% mutate(CD_MUN= as.double.factor(CD_MUN))
+
+muncp_cc_cov <- muncp_cc_cov[, 16:33] %>% st_drop_geometry() %>% tibble()
+djmaPopu_muncp <- djmaPopu_muncp %>% select(CD_rAdm, An, NOM_rAdm,  djmaPopu, CD_MUN)
+vktPopu_muncp <- vktPopu_muncp %>% ungroup() %>% select(RES_CO_REG, ANNEE, RES_NM_REG,  vktPopu, CD_MUN)
+
+
+acc_PA_mun <- acc_PA %>% filter(An>=2014) %>%
+  left_join(djmaPopu_muncp, by=join_by(An, CD_MUN)) %>% select(-CD_rAdm) %>%
+  left_join(vktPopu_muncp %>% select(-RES_CO_REG), by=join_by(An==ANNEE, CD_MUN)) %>% 
+  
+  # Routes
+  left_join(mw_muncp, by=join_by(CD_MUN)) %>%
+  left_join(tr_muncp, by=join_by(CD_MUN)) %>%
+  left_join(pr_muncp, by=join_by(CD_MUN)) %>%
+  left_join(sec_muncp, by=join_by(CD_MUN)) %>%
+  left_join(ter_muncp, by=join_by(CD_MUN)) %>%
+  left_join(somme_osm_muncp, by=join_by(CD_MUN)) %>%  
+  left_join(routeQc_muncp, by=join_by(CD_MUN)) %>%
+  
+  # Intersections
+  left_join(fC_muncp, by=join_by(CD_MUN)) %>%
+  left_join(stop_muncp, by=join_by(CD_MUN)) %>%
+  left_join(link_muncp, by=join_by(CD_MUN)) %>%
+  mutate(fCStopPond = fC+0.5*stop) %>%
+  # Hopitaux
+  left_join(hosp_muncp, by=join_by(CD_MUN)) %>%
+  
+  # CC
+  left_join(muncp_cc_cov %>% select(-CD_MRC), by=join_by(CD_MUN)) %>%
+  mutate(jeunes = a15_19+a20_24) %>%
+  mutate(ind_covid = ifelse(An>=2020, "Post-Covid", "Pre-Covid")) %>%
+  # mutate(expoDJMA_vieux = Pplt_21*sommeDJMA, expoVKT_vieux = Pplt_21*sommeVKT) %>%
+  mutate(rvn_md_div10000 = rvn_md_/10000) %>%
+  mutate(pp_dnst_div100 = pp_dnst/100)
+
+
+divAreaDiv100 <- function(x) ifelse(acc_PA_mun$Ar.skm.==0, 0, x/acc_PA_mun$Ar.skm.) / 100
+divPopuTimes100 <- function(x){ifelse(acc_PA_mun$Pplt_21 == 0 | x == 0,
+                                      mean(x[acc_PA_mun$Pplt_21 != 0 & x != 0] / acc_PA_mun$Pplt_21[acc_PA_mun$Pplt_21 != 0 & x != 0]),
+                                      (x / acc_PA_mun$Pplt_21)) * 100
+  }
+divRoutesTimes100 <- function(x) ifelse(acc_PA_mun$sommeRoute==0, 0, x/acc_PA_mun$sommeRoute) * 100
+divAreaTimes10 <- function(x) ifelse(acc_PA_mun$Ar.skm.==0, 0, x/acc_PA_mun$Ar.skm.) * 10
+divArea <- function(x) ifelse(acc_PA_mun$Ar.skm.==0, 0, x/acc_PA_mun$Ar.skm.) 
+
+acc_PA_mun <- acc_PA_mun %>%
+  mutate(across(c("motorway", "trunk", "primary", "secondary", "tertiary", "sommeRoute", "routeQc", "link", "hosp"), divAreaDiv100, .names = "{.col}_divAreaDiv100")) %>%
+  mutate(across(c("mns_5An", "a15_19", "a20_24", "a65_pls", "femmes", "Bcc_pls", "scndr_m", "chomers", "C19_bnf", "jeunes", "hosp"), divPopuTimes100, .names = "{.col}_divPopuTimes100")) %>%
+  mutate(across(c("fC", "stop", "link"), divRoutesTimes100, .names = "{.col}_divRoutesTimes100")) %>%
+  mutate(across(c("fC", "stop", "hosp"), divAreaTimes10, .names = "{.col}_divAreaTimes10")) %>%
+  mutate(across(c("fC", "stop", "fCStopPond"), divArea, .names = "{.col}_divArea"))
+
+# Fixer les niveaux de référence
+acc_PA_mun$ind_covid <- relevel(as.factor(acc_PA_mun$ind_covid), ref="Pre-Covid")
+acc_PA_mun$CD_RA <- relevel(as.factor(acc_PA_mun$CD_RA), ref="6")
+acc_PA_mun$An <- relevel(as.factor(acc_PA_mun$An), ref="2020")
+
+save(acc_PA_mun, file = file.path(pathTraitees, "acc_PA_mun.Rda"))
+```
+
+
+
+# MRC
+
+```{r}
+# setdiff(mrc_cc_cov$CD_MRC, data_acc$MRC)
+# setdiff(data_acc$MRC, mrc_cc_cov$CD_MRC)
+# setdiff(mrc_cc_cov$CD_MRC, data_acc$MRC)
+# setdiff(data_acc$MRC, mrc_cc_cov$CD_MRC)
+```
+
+```{r}
+acc_PA_mrc <- acc_PJ %>%
+  group_by(An, gravite, MRC) %>%
+  summarise(nbAcc = sum(nbAcc)) %>%
+  dplyr::rename(CD_MRC=MRC)
+
+acc_PA_mrc_sep <- acc_PA_mrc %>%
+  group_by(An, gravite) %>%
+  group_split()
+
+acc_PA_mrc_plus <- acc_PJ %>%
+  group_by(An, MRC) %>%
+      summarise(nbAccTotal=sum(nbAcc), 
+            nbVic_Piet = sum(nbVic_Piet), 
+            nbVic_Velo = sum(nbVic_Velo), 
+            nbVic_Moto = sum(nbVic_Moto),
+            nbVic=sum(nbVic)
+            # nb1Veh=sum(nb1Veh), 
+            # nbVeh=sum(nbVeh),
+            # nbAcc_Piet=sum(nbAcc_Piet),
+            # nbAcc_Velo=sum(nbAcc_Velo),
+            # nbAcc_Moto=sum(nbAcc_Moto),
+            # nbBle_Piet=sum(nbBle_Piet),
+            # nbBle_Velo=sum(nbBle_Velo),
+            # nbBle_Moto=sum(nbBle_Moto)
+            ) %>%
+  dplyr::rename(CD_MRC=MRC)
+
+acc_PA_mrc_plusPlus <-  acc_PJ %>%
+  group_by(An, gravite, MRC) %>%
+  summarise(nb1Veh=sum(nb1Veh), 
+            nbVehImpliqué=sum(nbVeh),
+            nbAcc_Piet_M = sum(nbAcc_Piet),
+            nbAcc_Velo_M = sum(nbAcc_Velo),
+            nbAcc_Moto_M = sum(nbAcc_Moto),
+            nbAcc_Piet_Ble = sum(nbBle_Piet),
+            nbAcc_Velo_Ble = sum(nbBle_Velo),
+            nbAcc_Moto_Ble = sum(nbBle_Moto),
+            nbAcc_UV_Ble = sum(nbBle_UV),
+            nbAcc_UV_M = sum(nbAcc_UV_M),
+            nbDispSecFautif = sum(nbDispSecFautif)) %>%
+  dplyr::rename(CD_MRC=MRC) 
+
+dA_temp_mrc <- data_acc %>%
+  group_by(an, gravite, MRC) %>%
+  summarise(VITESSE_AUTOR=mean(VITESSE_AUTOR),
+            ptsTot = sum(points),
+            ptsMoy=mean(points),
+            nbConducteurs=length(DT_ACCDN)) %>%
+  dplyr::rename(CD_MRC = MRC,
+         An = an)
+```
+
+```{r}
+df_mrc <- as_tibble(data.frame(CD_MRC = unique(mrc_cc_cov$CD_MRC)))
+n_mrc <- length(unique(mrc_cc_cov$CD_MRC))
+n <- length(unique(mrc_cc_cov$CD_MRC)) * length(unique(acc_PA_mrc$gravite)) * length(unique(acc_PA_mrc$An))
+
+# Si on souhaite ajouter des variables : nom = rep(NA, n)
+df_complet <- data.frame(An = rep(NA, n), gravite = rep(NA, n), CD_MRC = rep(NA, n), nbAcc = rep(NA, n), MUS_CO_REG = rep(NA, n))
+
+qc_mrc_ra <- mrc_cc_cov %>% select(CD_MRC, CD_rAdm) %>% st_drop_geometry() %>% as_tibble()
+
+# verif
+  verif <- mrc_cc_cov %>% select(CD_MRC, CD_rAdm) %>% st_drop_geometry()
+  table(qc_mrc_ra==verif)
+
+colnames(qc_mrc_ra)[2] <- "CD_RA"
+df_mrc <- qc_mrc_ra
+compteur=1
+
+for (i in acc_PA_mrc_sep) {
+  temp <- right_join(i, df_mrc)
+  temp[, 1:3] <- apply(temp[, 1:3], 2, function(x) zoo::na.locf(x, na.rm = FALSE, fromLast = TRUE))
+  temp[, 1:3] <- apply(temp[, 1:3], 2, function(x) zoo::na.locf(x, na.rm = FALSE, fromLast = FALSE))
+  temp$nbAcc <- ifelse(is.na(temp$nbAcc), 0, temp$nbAcc)
+  temp$CD_MRC <- as.numeric(temp$CD_MRC)
+  temp$CD_RA <- as.numeric(temp$CD_RA)
+  df_complet[((compteur-1)*n_mrc+1):((compteur)*n_mrc),] <- temp
+  print(compteur)
+  compteur = compteur+1
+}
+
+acc_PA <- tibble(df_complet)
+colnames(acc_PA)[which(names(acc_PA) %in% c("MUS_CO_REG"))] <- c("CD_RA")
+acc_PA$An <- as.numeric(acc_PA$An)
+acc_PA <- left_join(acc_PA, acc_PA_mrc_plus)
+acc_PA <- left_join(acc_PA, acc_PA_mrc_plusPlus)
+acc_PA$nbVic_Piet <- ifelse(is.na(acc_PA$nbVic_Piet), 0, acc_PA$nbVic_Piet)
+acc_PA$nbVic_Velo <- ifelse(is.na(acc_PA$nbVic_Velo), 0, acc_PA$nbVic_Velo)
+acc_PA$nbVic_Moto <- ifelse(is.na(acc_PA$nbVic_Moto), 0, acc_PA$nbVic_Moto)
+acc_PA$nbVic <- ifelse(is.na(acc_PA$nbVic), 0, acc_PA$nbVic)
+acc_PA$nb1Veh <- ifelse(is.na(acc_PA$nb1Veh), 0, acc_PA$nb1Veh)
+acc_PA$nbVehImpliqué <- ifelse(is.na(acc_PA$nbVehImpliqué), 0, acc_PA$nbVehImpliqué)
+acc_PA$nbAccTotal <- ifelse(is.na(acc_PA$nbAccTotal), 0, acc_PA$nbAccTotal)
+
+acc_PA <- left_join(acc_PA, dA_temp_mrc)
+acc_PA$ptsMoy <- ifelse(is.na(acc_PA$ptsMoy), 0, acc_PA$ptsMoy)
+acc_PA$ptsTot <- ifelse(is.na(acc_PA$ptsTot), 0, acc_PA$ptsTot)
+acc_PA$nbConducteurs <- ifelse(is.na(acc_PA$nbConducteurs), 0, acc_PA$nbConducteurs)
+acc_PA$nbAcc_Piet_M <- ifelse(is.na(acc_PA$nbAcc_Piet_M), 0, acc_PA$nbAcc_Piet_M)
+acc_PA$nbAcc_Velo_M <- ifelse(is.na(acc_PA$nbAcc_Velo_M), 0, acc_PA$nbAcc_Velo_M)
+acc_PA$nbAcc_Moto_M <- ifelse(is.na(acc_PA$nbAcc_Moto_M), 0, acc_PA$nbAcc_Moto_M)
+acc_PA$nbAcc_Piet_Ble <- ifelse(is.na(acc_PA$nbAcc_Piet_Ble), 0, acc_PA$nbAcc_Piet_Ble)
+acc_PA$nbAcc_Velo_Ble <- ifelse(is.na(acc_PA$nbAcc_Velo_Ble), 0, acc_PA$nbAcc_Velo_Ble)
+acc_PA$nbAcc_Moto_Ble <- ifelse(is.na(acc_PA$nbAcc_Moto_Ble), 0, acc_PA$nbAcc_Moto_Ble)
+acc_PA$nbAcc_UV_Ble <- ifelse(is.na(acc_PA$nbAcc_UV_Ble), 0, acc_PA$nbAcc_UV_Ble)
+acc_PA$nbAcc_UV_M <- ifelse(is.na(acc_PA$nbAcc_UV_M), 0, acc_PA$nbAcc_UV_M)
+acc_PA$nbDispSecFautif <- ifelse(is.na(acc_PA$nbDispSecFautif), 0, acc_PA$nbDispSecFautif)
+
+
+acc_PA <- acc_PA %>%
+  left_join(dA_vit, by = join_by(An==an, gravite==gravite), suffix=c("","_mean")) %>%
+  mutate(VITESSE_AUTOR = ifelse(is.na(VITESSE_AUTOR), VITESSE_AUTOR_mean, VITESSE_AUTOR)) %>%
+  select(-VITESSE_AUTOR_mean)
+
+acc_PA$nbAcc_Piet <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_Piet_M, acc_PA$nbAcc_Piet_Ble)
+acc_PA$nbAcc_Velo <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_Velo_M, acc_PA$nbAcc_Velo_Ble)
+acc_PA$nbAcc_Moto <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_Moto_M, acc_PA$nbAcc_Moto_Ble)
+
+acc_PA$nbAcc_UV <- ifelse(acc_PA$gravite == "Mortel", acc_PA$nbAcc_UV_M, acc_PA$nbAcc_UV_Ble)
+
+acc_PA$nbVehMoyen = ifelse(acc_PA$nbAcc==0, 0, acc_PA$nbVehImpliqué/acc_PA$nbAcc)
+summary(acc_PA$nbVehMoyen)
+
+```
+
+vérif
+```{r}
+# Verif
+# 
+# # #length(unique(acc_PA$CD_MUN))
+# length(unique(acc_PA$CD_MRC))
+# length(unique(acc_PA$CD_RA))
+# 
+# sum(acc_PA$nbAcc)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% dim()
+# 
+# sum(acc_PA$nbVic_Piet)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_PIETON) %>% sum()
+# sum(acc_PA$nbVic_Velo)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_VELO) %>% sum()
+# sum(acc_PA$nbVic_Moto)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_MOTO) %>% sum()
+# sum(acc_PA$nbVic)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_TOTAL) %>% sum()
+# sum(acc_PA$nb1Veh)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VEH_IMPLIQUES_ACCDN) %>% filter(NB_VEH_IMPLIQUES_ACCDN==1) %>% dim()
+# sum(acc_PA$nbVehImpliqué)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VEH_IMPLIQUES_ACCDN) %>% sum()
+# 
+# sum(acc_PA$VITESSE_AUTOR*acc_PA$nbConducteurs)
+# data_acc %>% select(VITESSE_AUTOR) %>% sum()
+# sum(acc_PA$ptsMoy*acc_PA$nbConducteurs)
+# data_acc %>% select(points) %>% sum()
+# sum(acc_PA$ptsTot)
+# data_acc %>% select(points) %>% sum()
+# sum(acc_PA$nbConducteurs)
+# data_acc %>% dim
+# 
+# 
+# sum(acc_PA$nbAcc_Piet_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA$nbAcc_Velo_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA$nbAcc_Moto_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Piet_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Velo_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Moto_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Piet_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Velo_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Moto_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_UV_Ble)
+# sum(acc_PA %>% filter(gravite=="Léger") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0 | NB_DECES_VELO>0 | NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_UV_Ble)
+# sum(acc_PA %>% filter(gravite=="Grave") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0, 1, 0)
+# ) %>% .$ind_ble %>% sum
+# 
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_UV_M)
+# sum(acc_PA %>% filter(gravite=="Mortel") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_bleDec = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0 | NB_DECES_PIETON>0 | NB_DECES_VELO>0 | NB_DECES_MOTO>0, 1, 0)
+# ) %>% .$ind_bleDec %>% sum
+# 
+# sum(acc_PA$nbDispSecFautif)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% .$indDispSecFautif %>% sum
+```
+
+```{r}
+as.double.factor <- function(x) {as.numeric(levels(x))[x]}
+
+mrc_routes <- mrc_routes %>% select(-geometry)
+mw_mrc <- mrc_routes %>% filter(highway=="motorway") %>% select(longueur, code) %>% dplyr::rename(motorway=longueur, CD_MRC=code)
+tr_mrc <- mrc_routes %>% filter(highway=="trunk") %>% select(longueur, code) %>% dplyr::rename(trunk=longueur, CD_MRC=code)
+pr_mrc <- mrc_routes %>% filter(highway=="primary") %>% select(longueur, code) %>% dplyr::rename(primary=longueur, CD_MRC=code)
+sec_mrc <- mrc_routes %>% filter(highway=="secondary") %>% select(longueur, code) %>% dplyr::rename(secondary=longueur, CD_MRC=code)
+ter_mrc <- mrc_routes %>% filter(highway=="tertiary") %>% select(longueur, code) %>% dplyr::rename(tertiary=longueur, CD_MRC=code)
+routeQc_mrc <- mrc_routes %>% filter(highway=="Débit") %>% select(longueur, code) %>% dplyr::rename(routeQc=longueur, CD_MRC=code)
+somme_osm_mrc <- tibble(sommeRoute=mw_mrc$motorway + tr_mrc$trunk + pr_mrc$primary + sec_mrc$secondary + ter_mrc$tertiary) %>% cbind(tibble(CD_MRC=mw_mrc$CD_MRC)) %>% tibble()
+
+fC_mrc <- fC_mrc %>% tibble() %>% dplyr::rename(fC=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+stop_mrc <- stop_mrc %>% tibble() %>% dplyr::rename(stop=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+link_mrc <- link_mrc %>% tibble() %>% dplyr::rename(link=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+hosp_mrc <- hosp_mrc %>% tibble() %>% dplyr::rename(hosp=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+
+mrc_cc_cov <- mrc_cc_cov[, 13:29] %>% st_drop_geometry() %>% tibble()
+djmaPopu_mrc <- djmaPopu_mrc %>% select(CD_rAdm, An, NOM_rAdm,  djmaPopu, CD_MRC)
+vktPopu_mrc <- vktPopu_mrc %>% ungroup() %>% select(RES_CO_REG, ANNEE,  RES_CO_REG,  vktPopu, CD_MRC)
+
+
+acc_PA_mrc <- acc_PA %>% filter(An>=2014) %>%
+  left_join(djmaPopu_mrc, by=join_by(An, CD_MRC)) %>% select(-CD_rAdm) %>%
+  left_join(vktPopu_mrc %>% select(-RES_CO_REG), by=join_by(An==ANNEE, CD_MRC)) %>%
+  left_join(mw_mrc, by=join_by(CD_MRC)) %>%
+  left_join(tr_mrc, by=join_by(CD_MRC)) %>%
+  left_join(pr_mrc, by=join_by(CD_MRC)) %>%
+  left_join(sec_mrc, by=join_by(CD_MRC)) %>%
+  left_join(ter_mrc, by=join_by(CD_MRC)) %>%
+  left_join(somme_osm_mrc, by=join_by(CD_MRC)) %>%  
+  left_join(routeQc_mrc, by=join_by(CD_MRC)) %>%
+  left_join(fC_mrc, by=join_by(CD_MRC)) %>%
+  left_join(stop_mrc, by=join_by(CD_MRC)) %>%
+  left_join(link_mrc, by=join_by(CD_MRC)) %>%
+  left_join(hosp_mrc, by=join_by(CD_MRC)) %>%
+  mutate(fCStopPond = fC+0.5*stop) %>%
+  
+  left_join(mrc_cc_cov, by=join_by(CD_MRC)) %>%
+  mutate(jeunes = a15_19+a20_24) %>%
+  mutate(ind_covid = ifelse(An>=2020, "Post-Covid", "Pre-Covid")) %>%
+  # mutate(expoDJMA = Pplt_21*sommeDJMA, expoVKT = Pplt_21*sommeVKT) %>%
+  mutate(rvn_md_div10000 = rvn_md_/10000) %>%
+  mutate(pp_dnst_div100 = pp_dnst/100)
+
+divAreaDiv100 <- function(x) ifelse(acc_PA_mrc$Ar.skm.==0, 0, x/acc_PA_mrc$Ar.skm.) / 100
+divPopuTimes100 <- function(x){ifelse(acc_PA_mrc$Pplt_21 == 0 | x == 0,
+                                      mean(x[acc_PA_mrc$Pplt_21 != 0 & x != 0] / acc_PA_mrc$Pplt_21[acc_PA_mrc$Pplt_21 != 0 & x != 0]),
+                                      (x / acc_PA_mrc$Pplt_21)) * 100
+  }
+divRoutesTimes100 <- function(x) ifelse(acc_PA_mrc$sommeRoute==0, 0, x/acc_PA_mrc$sommeRoute) * 100
+divAreaTimes10 <- function(x) ifelse(acc_PA_mrc$Ar.skm.==0, 0, x/acc_PA_mrc$Ar.skm.) * 10
+divArea <- function(x) ifelse(acc_PA_mrc$Ar.skm.==0, 0, x/acc_PA_mrc$Ar.skm.) 
+
+acc_PA_mrc <- acc_PA_mrc %>%
+  mutate(across(c("motorway", "trunk", "primary", "secondary", "tertiary", "sommeRoute", "routeQc", "link", "hosp"), divAreaDiv100, .names = "{.col}_divAreaDiv100")) %>%
+  mutate(across(c("mns_5An", "a15_19", "a20_24", "a65_pls", "femmes", "Bcc_pls", "scndr_m", "chomers", "C19_bnf", "jeunes", "hosp"), divPopuTimes100, .names = "{.col}_divPopuTimes100")) %>%
+  mutate(across(c("fC", "stop", "link"), divRoutesTimes100, .names = "{.col}_divRoutesTimes100")) %>%
+  mutate(across(c("fC", "stop", "hosp"), divAreaTimes10, .names = "{.col}_divAreaTimes10")) %>%
+  mutate(across(c("fC", "stop", "fCStopPond"), divArea, .names = "{.col}_divArea"))
+
+
+# Fixer les niveaux de référence
+acc_PA_mrc$ind_covid <- relevel(as.factor(acc_PA_mrc$ind_covid), ref="Pre-Covid")
+acc_PA_mrc$CD_RA <- relevel(as.factor(acc_PA_mrc$CD_RA), ref="6")
+acc_PA_mrc$An <- relevel(as.factor(acc_PA_mrc$An), ref="2020")
+
+save(acc_PA_mrc, file = file.path(pathTraitees, "acc_PA_mrc.Rda"))
+```
+
+
+## MRC par mois
+
+```{r}
+acc_PM_mrc <- acc_PJ %>%
+  mutate(Mois=month(DT_ACCDN)) %>%
+  group_by(An, Mois, gravite, MRC) %>%
+  summarise(nbAcc = sum(nbAcc)) %>%
+  dplyr::rename(CD_MRC=MRC)
+
+acc_PM_mrc_sep <- acc_PM_mrc %>%
+  group_by(An, Mois, gravite) %>%
+  group_split()
+
+acc_PM_mrc_plus <- acc_PJ %>%
+  mutate(Mois=month(DT_ACCDN)) %>%
+  group_by(An, Mois, MRC) %>%
+      summarise(nbAccTotal=sum(nbAcc), 
+            nbVic_Piet = sum(nbVic_Piet), 
+            nbVic_Velo = sum(nbVic_Velo), 
+            nbVic_Moto = sum(nbVic_Moto),
+            nbVic=sum(nbVic), 
+            # nb1Veh=sum(nb1Veh), 
+            # nbVeh=sum(nbVeh),
+            # nbAcc_Piet=sum(nbAcc_Piet),
+            # nbAcc_Velo=sum(nbAcc_Velo),
+            # nbAcc_Moto=sum(nbAcc_Moto)
+            ) %>%
+  dplyr::rename(CD_MRC=MRC)
+
+acc_PM_mrc_plusPlus <-  acc_PJ %>%
+  mutate(Mois=month(DT_ACCDN)) %>%
+  group_by(An, Mois, gravite, MRC) %>%
+  summarise(nb1Veh=sum(nb1Veh), 
+            nbVehImpliqué=sum(nbVeh),
+            nbAcc_Piet_M = sum(nbAcc_Piet),
+            nbAcc_Velo_M = sum(nbAcc_Velo),
+            nbAcc_Moto_M = sum(nbAcc_Moto),
+            nbAcc_Piet_Ble = sum(nbBle_Piet),
+            nbAcc_Velo_Ble = sum(nbBle_Velo),
+            nbAcc_Moto_Ble = sum(nbBle_Moto),
+            nbAcc_UV_Ble = sum(nbBle_UV),
+            nbAcc_UV_M = sum(nbAcc_UV_M)) %>%
+  dplyr::rename(CD_MRC=MRC) 
+
+dA_temp_mrc <- data_acc%>%
+  mutate(Mois=month(DT_ACCDN)) %>%
+  group_by(an, Mois, gravite, MRC) %>%
+  summarise(VITESSE_AUTOR=mean(VITESSE_AUTOR),
+            ptsTot = sum(points),
+            ptsMoy=mean(points),
+            nbConducteurs=length(DT_ACCDN)) %>%
+  dplyr::rename(CD_MRC = MRC,
+         An = an)
+```
+
+```{r}
+df_mrc <- as_tibble(data.frame(CD_MRC = unique(mrc_cc_cov$CD_MRC)))
+n_mrc <- length(unique(mrc_cc_cov$CD_MRC))
+n <- length(unique(mrc_cc_cov$CD_MRC)) * length(unique(acc_PM_mrc$gravite)) * length(unique(acc_PM_mrc$An)) * length(unique(acc_PM_mrc$Mois))
+
+# Si on souhaite ajouter des variables : nom = rep(NA, n)
+df_complet <- data.frame(An = rep(NA, n), Mois = rep(NA, n), gravite = rep(NA, n), CD_MRC = rep(NA, n), nbAcc = rep(NA, n), MUS_CO_REG = rep(NA, n))
+
+qc_mrc_ra <- mrc_cc_cov %>% select(CD_MRC, CD_rAdm) %>% st_drop_geometry() %>% as_tibble()
+
+# verif
+  verif <- mrc_cc_cov %>% select(CD_MRC, CD_rAdm) %>% st_drop_geometry()
+  table(qc_mrc_ra==verif)
+
+colnames(qc_mrc_ra)[2] <- "CD_RA"
+df_mrc <- qc_mrc_ra
+compteur=1
+
+for (i in acc_PM_mrc_sep) {
+  temp <- right_join(i, df_mrc)
+  temp[, 1:3] <- apply(temp[, 1:3], 2, function(x) zoo::na.locf(x, na.rm = FALSE, fromLast = TRUE))
+  temp[, 1:3] <- apply(temp[, 1:3], 2, function(x) zoo::na.locf(x, na.rm = FALSE, fromLast = FALSE))
+  temp$nbAcc <- ifelse(is.na(temp$nbAcc), 0, temp$nbAcc)
+  df_complet[((compteur-1)*n_mrc+1):((compteur)*n_mrc),] <- temp
+  print(compteur)
+  compteur = compteur+1
+}
+
+acc_PM <- tibble(df_complet)
+colnames(acc_PM)[which(names(acc_PM) %in% c("MUS_CO_REG"))] <- c("CD_RA")
+acc_PM$An <- as.numeric(acc_PM$An)
+acc_PM$Mois <- as.numeric(acc_PM$Mois)
+acc_PM <- left_join(acc_PM, acc_PM_mrc_plus)
+acc_PM <- left_join(acc_PM, acc_PM_mrc_plusPlus)
+acc_PM$nbVic_Piet <- ifelse(is.na(acc_PM$nbVic_Piet), 0, acc_PM$nbVic_Piet)
+acc_PM$nbVic_Velo <- ifelse(is.na(acc_PM$nbVic_Velo), 0, acc_PM$nbVic_Velo)
+acc_PM$nbVic_Moto <- ifelse(is.na(acc_PM$nbVic_Moto), 0, acc_PM$nbVic_Moto)
+acc_PM$nbVic <- ifelse(is.na(acc_PM$nbVic), 0, acc_PM$nbVic)
+acc_PM$nb1Veh <- ifelse(is.na(acc_PM$nb1Veh), 0, acc_PM$nb1Veh)
+acc_PM$nbVehImpliqué <- ifelse(is.na(acc_PM$nbVehImpliqué), 0, acc_PM$nbVehImpliqué)
+acc_PM$nbAccTotal <- ifelse(is.na(acc_PM$nbAccTotal), 0, acc_PM$nbAccTotal)
+
+acc_PM <- left_join(acc_PM, dA_temp_mrc)
+acc_PM$ptsMoy <- ifelse(is.na(acc_PM$ptsMoy), 0, acc_PM$ptsMoy)
+acc_PM$ptsTot <- ifelse(is.na(acc_PM$ptsTot), 0, acc_PM$ptsTot)
+acc_PM$nbConducteurs <- ifelse(is.na(acc_PM$nbConducteurs), 0, acc_PM$nbConducteurs)
+# acc_PM$nbAcc_Piet <- ifelse(is.na(acc_PM$nbAcc_Piet), 0, acc_PM$nbAcc_Piet)
+# acc_PM$nbAcc_Velo <- ifelse(is.na(acc_PM$nbAcc_Velo), 0, acc_PM$nbAcc_Velo)
+# acc_PM$nbAcc_Moto <- ifelse(is.na(acc_PM$nbAcc_Moto), 0, acc_PM$nbAcc_Moto)
+acc_PM$nbAcc_Piet_M <- ifelse(is.na(acc_PM$nbAcc_Piet_M), 0, acc_PM$nbAcc_Piet_M)
+acc_PM$nbAcc_Velo_M <- ifelse(is.na(acc_PM$nbAcc_Velo_M), 0, acc_PM$nbAcc_Velo_M)
+acc_PM$nbAcc_Moto_M <- ifelse(is.na(acc_PM$nbAcc_Moto_M), 0, acc_PM$nbAcc_Moto_M)
+acc_PM$nbAcc_Piet_Ble <- ifelse(is.na(acc_PM$nbAcc_Piet_Ble), 0, acc_PM$nbAcc_Piet_Ble)
+acc_PM$nbAcc_Velo_Ble <- ifelse(is.na(acc_PM$nbAcc_Velo_Ble), 0, acc_PM$nbAcc_Velo_Ble)
+acc_PM$nbAcc_Moto_Ble <- ifelse(is.na(acc_PM$nbAcc_Moto_Ble), 0, acc_PM$nbAcc_Moto_Ble)
+acc_PM$nbAcc_UV_Ble <- ifelse(is.na(acc_PM$nbAcc_UV_Ble), 0, acc_PM$nbAcc_UV_Ble)
+acc_PM$nbAcc_UV_M <- ifelse(is.na(acc_PM$nbAcc_UV_M), 0, acc_PM$nbAcc_UV_M)
+
+
+acc_PM <- acc_PM %>%
+  left_join(dA_vit, by = join_by(An==an, gravite==gravite), suffix=c("","_mean")) %>%
+  mutate(VITESSE_AUTOR = ifelse(is.na(VITESSE_AUTOR), VITESSE_AUTOR_mean, VITESSE_AUTOR)) %>%
+  select(-VITESSE_AUTOR_mean)
+
+acc_PM$nbAcc_Piet <- ifelse(acc_PM$gravite == "Mortel", acc_PM$nbAcc_Piet_M, acc_PM$nbAcc_Piet_Ble)
+acc_PM$nbAcc_Velo <- ifelse(acc_PM$gravite == "Mortel", acc_PM$nbAcc_Velo_M, acc_PM$nbAcc_Velo_Ble)
+acc_PM$nbAcc_Moto <- ifelse(acc_PM$gravite == "Mortel", acc_PM$nbAcc_Moto_M, acc_PM$nbAcc_Moto_Ble)
+
+
+acc_PM$nbAcc_UV <- ifelse(acc_PM$gravite == "Mortel", acc_PM$nbAcc_UV_M, acc_PM$nbAcc_UV_Ble)
+
+acc_PM$nbVehMoyen = ifelse(acc_PM$nbAcc==0 | acc_PM$nbVehImpliqué>100, 0, acc_PM$nbVehImpliqué/acc_PM$nbAcc)
+```
+
+vérif
+```{r}
+# Verif
+
+# #length(unique(acc_PM$CD_MUN))
+# length(unique(acc_PM$CD_MRC))
+# length(unique(acc_PM$CD_RA))
+# 
+# sum(acc_PM$nbAcc)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% dim()
+# 
+# sum(acc_PM$nbVic_Piet)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_PIETON) %>% sum()
+# sum(acc_PM$nbVic_Velo)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_VELO) %>% sum()
+# sum(acc_PM$nbVic_Moto)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_MOTO) %>% sum()
+# sum(acc_PM$nbVic)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VICTIMES_TOTAL) %>% sum()
+# sum(acc_PM$nb1Veh)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VEH_IMPLIQUES_ACCDN) %>% filter(NB_VEH_IMPLIQUES_ACCDN==1) %>% dim()
+# sum(acc_PM$nbVehImpliqué)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% select(NB_VEH_IMPLIQUES_ACCDN) %>% sum()
+# 
+# sum(acc_PM$VITESSE_AUTOR*acc_PM$nbConducteurs)
+# data_acc %>% select(VITESSE_AUTOR) %>% sum()
+# sum(acc_PM$ptsMoy*acc_PM$nbConducteurs)
+# data_acc %>% select(points) %>% sum()
+# sum(acc_PM$ptsTot)
+# data_acc %>% select(points) %>% sum()
+# sum(acc_PM$nbConducteurs)
+# data_acc %>% dim
+# 
+# sum(acc_PM$nbAcc_Piet_M)
+# sum(acc_PM %>% filter(gravite=="Mortel") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PM$nbAcc_Velo_M)
+# sum(acc_PM %>% filter(gravite=="Mortel") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PM$nbAcc_Moto_M)
+# sum(acc_PM %>% filter(gravite=="Mortel") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_Piet_Ble)
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_Velo_Ble)
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_Moto_Ble)
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_Piet_Ble)
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_Piet)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_Velo_Ble)
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_Velo)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_VELO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_VELO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_Moto_Ble)
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_Moto)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_UV_Ble)
+# sum(acc_PM %>% filter(gravite=="Léger") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Léger") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0, 1, 0),
+#   ind_dec = ifelse(NB_DECES_PIETON>0 | NB_DECES_VELO>0 | NB_DECES_MOTO>0, 1, 0),
+#   ind = ifelse(ind_ble==1 | ind_dec==1, 1, 0)
+# ) %>% .$ind %>% sum
+# 
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_UV_Ble)
+# sum(acc_PM %>% filter(gravite=="Grave") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Grave") %>% mutate(
+#   ind_ble = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0, 1, 0)
+# ) %>% .$ind_ble %>% sum
+# 
+# sum(acc_PM %>% filter(gravite=="Mortel") %>% .$nbAcc_UV_M)
+# sum(acc_PM %>% filter(gravite=="Mortel") %>% .$nbAcc_UV)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% filter(gravite=="Mortel") %>% mutate(
+#   ind_bleDec = ifelse(NB_BLESSES_PIETON>0 | NB_BLESSES_VELO>0 | NB_BLESSES_MOTO>0 | NB_DECES_PIETON>0 | NB_DECES_VELO>0 | NB_DECES_MOTO>0, 1, 0)
+# ) %>% .$ind_bleDec %>% sum
+```
+
+
+```{r}
+# as.double.factor <- function(x) {as.numeric(levels(x))[x]}
+# 
+# mrc_routes <- mrc_routes %>% select(-geometry)
+# mw_mrc <- mrc_routes %>% filter(highway=="motorway") %>% select(longueur, code) %>% dplyr::rename(motorway=longueur, CD_MRC=code)
+# tr_mrc <- mrc_routes %>% filter(highway=="trunk") %>% select(longueur, code) %>% dplyr::rename(trunk=longueur, CD_MRC=code)
+# pr_mrc <- mrc_routes %>% filter(highway=="primary") %>% select(longueur, code) %>% dplyr::rename(primary=longueur, CD_MRC=code)
+# sec_mrc <- mrc_routes %>% filter(highway=="secondary") %>% select(longueur, code) %>% dplyr::rename(secondary=longueur, CD_MRC=code)
+# ter_mrc <- mrc_routes %>% filter(highway=="tertiary") %>% select(longueur, code) %>% dplyr::rename(tertiary=longueur, CD_MRC=code)
+# routeQc_mrc <- mrc_routes %>% filter(highway=="Débit") %>% select(longueur, code) %>% dplyr::rename(routeQc=longueur, CD_MRC=code)
+# somme_osm_mrc <- tibble(sommeRoute=mw_mrc$motorway + tr_mrc$trunk + pr_mrc$primary + sec_mrc$secondary + ter_mrc$tertiary) %>% cbind(tibble(CD_MRC=mw_mrc$CD_MRC)) %>% tibble()
+# 
+# fC_mrc <- fC_mrc %>% tibble() %>% dplyr::rename(fC=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+# stop_mrc <- stop_mrc %>% tibble() %>% dplyr::rename(stop=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+# link_mrc <- link_mrc %>% tibble() %>% dplyr::rename(link=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+# hosp_mrc <- hosp_mrc %>% tibble() %>% dplyr::rename(hosp=cov) %>% mutate(CD_MRC= as.double.factor(CD_MRC))
+# 
+# mrc_cc_cov <- mrc_cc_cov[, 13:29] %>% st_drop_geometry() %>% tibble()
+# djmaPopu_mrc <- djmaPopu_mrc %>% select(CD_rAdm, An, `Abréviation courante`,  djmaPopu, CD_MRC)
+# vktPopu_mrc <- vktPopu_mrc %>% ungroup() %>% select(RES_CO_REG, ANNEE, `Abréviation courante`,  vktPopu, CD_MRC)
+
+
+acc_PM_mrc <- acc_PM %>% filter(An>=2014) %>%
+  left_join(djmaPopu_mrc, by=join_by(An, CD_MRC)) %>% select(-CD_rAdm) %>%
+  left_join(vktPopu_mrc %>% select(-RES_CO_REG), by=join_by(An==ANNEE, CD_MRC)) %>% 
+  left_join(mw_mrc, by=join_by(CD_MRC)) %>%
+  left_join(tr_mrc, by=join_by(CD_MRC)) %>%
+  left_join(pr_mrc, by=join_by(CD_MRC)) %>%
+  left_join(sec_mrc, by=join_by(CD_MRC)) %>%
+  left_join(ter_mrc, by=join_by(CD_MRC)) %>%
+  left_join(somme_osm_mrc, by=join_by(CD_MRC)) %>%  
+  left_join(routeQc_mrc, by=join_by(CD_MRC)) %>%
+  left_join(fC_mrc, by=join_by(CD_MRC)) %>%
+  left_join(stop_mrc, by=join_by(CD_MRC)) %>%
+  mutate(fCStopPond = fC+0.5*stop) %>%
+  
+  left_join(link_mrc, by=join_by(CD_MRC)) %>%
+  left_join(hosp_mrc, by=join_by(CD_MRC)) %>%
+  left_join(mrc_cc_cov, by=join_by(CD_MRC)) %>%
+  mutate(jeunes = a15_19+a20_24) %>%
+  mutate(ind_covid = ifelse((An>=2020 & Mois>=3) | An >2020, "Post-Covid", "Pre-Covid")) %>%
+  # mutate(expoDJMA = Pplt_21*sommeDJMA, expoVKT = Pplt_21*sommeVKT) %>%
+  mutate(rvn_md_div10000 = rvn_md_/10000) %>%
+  mutate(pp_dnst_div100 = pp_dnst/100)
+
+
+# min(x[x!=0], na.rm=T)/min(acc_PM_mrc$Pplt_21[x!=0], na.rm=T)
+divAreaDiv100 <- function(x) ifelse(acc_PM_mrc$Ar.skm.==0, 0, x/acc_PM_mrc$Ar.skm.) / 100
+divPopuTimes100 <- function(x){ifelse(acc_PM_mrc$Pplt_21 == 0 | x == 0,
+                                      mean(x[acc_PM_mrc$Pplt_21 != 0 & x != 0] / acc_PM_mrc$Pplt_21[acc_PM_mrc$Pplt_21 != 0 & x != 0]),
+                                      (x / acc_PM_mrc$Pplt_21)) * 100
+  }
+divRoutesTimes100 <- function(x) ifelse(acc_PM_mrc$sommeRoute==0, 0, x/acc_PM_mrc$sommeRoute) * 100
+divAreaTimes10 <- function(x) ifelse(acc_PM_mrc$Ar.skm.==0, 0, x/acc_PM_mrc$Ar.skm.) * 10
+divArea <- function(x) ifelse(acc_PM_mrc$Ar.skm.==0, 0, x/acc_PM_mrc$Ar.skm.) 
+
+acc_PM_mrc <- acc_PM_mrc %>%
+  mutate(across(c("motorway", "trunk", "primary", "secondary", "tertiary", "sommeRoute", "routeQc", "link", "hosp"), divAreaDiv100, .names = "{.col}_divAreaDiv100")) %>%
+  mutate(across(c("mns_5An", "a15_19", "a20_24", "a65_pls", "femmes", "Bcc_pls", "scndr_m", "chomers", "C19_bnf", "jeunes", "hosp"), divPopuTimes100, .names = "{.col}_divPopuTimes100")) %>%
+  mutate(across(c("fC", "stop", "link"), divRoutesTimes100, .names = "{.col}_divRoutesTimes100")) %>%
+  mutate(across(c("fC", "stop", "hosp"), divAreaTimes10, .names = "{.col}_divAreaTimes10")) %>%
+  mutate(across(c("fC", "stop", "fCStopPond"), divArea, .names = "{.col}_divArea"))
+
+# Fixer les niveaux de référence
+acc_PM_mrc$ind_covid <- relevel(as.factor(acc_PM_mrc$ind_covid), ref="Pre-Covid")
+acc_PM_mrc$CD_RA <- relevel(as.factor(acc_PM_mrc$CD_RA), ref="6")
+acc_PM_mrc$An <- relevel(as.factor(acc_PM_mrc$An), ref="2020")
+
+save(acc_PM_mrc, file = file.path(pathTraitees, "acc_PM_mrc.Rda"))
+
+# table(acc_PM_mrc$ind_covid)
+# sum(table(acc_PM_mrc$ind_covid))
+# length(unique(acc_PM_mrc$gravite))*length(unique(acc_PM_mrc$CD_MRC)) * length(unique(acc_PM_mrc$An))*length(unique(acc_PM_mrc$Mois))
+
+# acc_PM_mrc %>% select(An, Mois, ind_covid) %>% view
+```
+
+
+# Verif
+```{r}
+load(file.path(pathTraitees, "acc_PA_mrc.Rda"))
+load(file.path(pathTraitees, "acc_PA_mun.Rda"))
+load(file.path(pathTraitees, "acc_PM_mrc.Rda"))
+load(file.path(pathTraitees, "data_acc_maj.Rda"))
+
+
+# sum(acc_PA_mun$nbAcc)
+# sum(acc_PA_mrc$nbAcc)
+# sum(acc_PM_mrc$nbAcc)
+# data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% dim
+#
+# sum(acc_PA_mun$nbVic_Piet)
+# sum(acc_PA_mrc$nbVic_Piet)
+# sum(acc_PM_mrc$nbVic_Piet)
+# 3*data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T) %>% .$NB_VICTIMES_PIETON %>% sum
+# data_acc$NB_VICTIMES_PIETON
+
+```
+
+
+
+# Figures - Tableau résumé
+```{r}
+# tab: osm_mun_resume ####
+tab_resume_mun <- acc_PA_mun %>%
+  filter(An==2020, gravite=="Mortel") %>% 
+  mutate(motorway=motorway/1000,
+         trunk=trunk/1000,
+         primary=primary/1000,
+         secondary=secondary/1000,
+         tertiary=tertiary/1000,
+         sommeRoute=sommeRoute/1000,
+         routeQc=routeQc/1000) %>%
+  data.frame() %>%
+  select("Longueur des routes de type motorway (km)"=motorway, 
+         "Longueur des routes de type trunk (km)"=trunk, 
+         "Longueur des routes de type primary (km)"=primary, 
+         "Longueur des routes de type secondary (km)"=secondary, 
+         "Longueur des routes de type tertiary (km)"=tertiary, 
+         "Longueur des routes OSM sommées (km)"=sommeRoute, 
+         "Longueur des routes du MTMD (km)"=routeQc, 
+         "Nombre de feux de circulation"=fC, 
+         "Nombre de panneaux d'arrêt"=stop, 
+         "Nombre d'hôpitaux"=hosp, 
+         "Longueur motorway / Superficie * 10"=motorway_divAreaDiv100, 
+         "Longueur trunk / Superficie * 10"=trunk_divAreaDiv100, 
+         "Longueur primary / Superficie * 10"=primary_divAreaDiv100, 
+         "Longueur secondary / Superficie * 10"=secondary_divAreaDiv100, 
+         "Longueur tertiary / Superficie * 10"=tertiary_divAreaDiv100, 
+         "Longueur  routes OSM sommées / Superficie * 10"=sommeRoute_divAreaDiv100, 
+         "Longueur routes MTMD / Superficie * 10"=routeQc_divAreaDiv100, 
+         "Nb. de feux de circul. / Superficie "=fC_divArea, 
+         "Nb. de panneaux d'arrêt / Superficie "=stop_divArea, 
+         "(Nb. de feux de circul. + 1/2 * Nb. panneaux d'arrêt) / Superficie "= fCStopPond_divArea,  
+         "Nombre d'hôpitaux / Superficie * 10"=hosp_divAreaTimes10) %>% 
+  stargazer(., type="text", digit.separator="", digits=3, digits.extra = 2, header=F, out.header=F)
+
+# tab: osm_mrc_resume ####
+tab_resume_mrc <- acc_PA_mrc %>%
+  filter(An==2020, gravite=="Mortel") %>% 
+  mutate(motorway=motorway/1000,
+         trunk=trunk/1000,
+         primary=primary/1000,
+         secondary=secondary/1000,
+         tertiary=tertiary/1000,
+         sommeRoute=sommeRoute/1000,
+         routeQc=routeQc/1000) %>%
+  data.frame() %>%
+  select("Longueur des routes de type motorway (km)"=motorway, 
+         "Longueur des routes de type trunk (km)"=trunk, 
+         "Longueur des routes de type primary (km)"=primary, 
+         "Longueur des routes de type secondary (km)"=secondary, 
+         "Longueur des routes de type tertiary (km)"=tertiary, 
+         "Longueur des routes OSM sommées (km)"=sommeRoute, 
+         "Longueur des routes du MTMD (km)"=routeQc, 
+         "Nombre de feux de circulation"=fC, 
+         "Nombre de panneaux d'arrêt"=stop, 
+         "Nombre d'hôpitaux"=hosp, 
+         "Longueur motorway / Superficie * 10"=motorway_divAreaDiv100, 
+         "Longueur trunk / Superficie * 10"=trunk_divAreaDiv100, 
+         "Longueur primary / Superficie * 10"=primary_divAreaDiv100, 
+         "Longueur secondary / Superficie * 10"=secondary_divAreaDiv100, 
+         "Longueur tertiary / Superficie * 10"=tertiary_divAreaDiv100, 
+         "Longueur  routes OSM sommées / Superficie * 10"=sommeRoute_divAreaDiv100, 
+         "Longueur routes MTMD / Superficie * 10"=routeQc_divAreaDiv100, 
+         "Nb. de feux de circul. / Superficie "=fC_divArea, 
+         "Nb. de panneaux d'arrêt / Superficie "=stop_divArea, 
+         "(Nb. de feux de circul. + 1/2 * Nb. panneaux d'arrêt) / Superficie "= fCStopPond_divArea,      
+         "Nombre d'hôpitaux / Superficie * 10"=hosp_divAreaTimes10) %>% 
+  stargazer(., type="latex", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+
+
+tab_resume_mrc_PM <- acc_PM_mrc %>%
+  filter(An==2020, gravite=="Mortel", Mois==12) %>% 
+  data.frame() %>%
+  select("Longueur des routes de type motorway"=motorway, 
+         "Longueur des routes de type trunk"=trunk, 
+         "Longueur des routes de type primary"=primary, 
+         "Longueur des routes de type secondary"=secondary, 
+         "Longueur des routes de type tertiary"=tertiary, 
+         "Longueur des routes OSM sommées"=sommeRoute, 
+         "Longueur des routes du MTMD"=routeQc, 
+         "Nombre de feux de circulation"=fC, 
+         "Nombre de panneaux d'arrêt"=stop, 
+         "Nombre d'hôpitaux"=hosp, 
+         "Longueur motorway / Superficie / 100"=motorway_divAreaDiv100, 
+         "Longueur trunk / Superficie / 100"=trunk_divAreaDiv100, 
+         "Longueur primary / Superficie / 100"=primary_divAreaDiv100, 
+         "Longueur secondary / Superficie / 100"=secondary_divAreaDiv100, 
+         "Longueur tertiary / Superficie / 100"=tertiary_divAreaDiv100, 
+         "Longueur  routes OSM sommées / Superficie / 100"=sommeRoute_divAreaDiv100, 
+         "Longueur routes MTMD / Superficie / 100"=routeQc_divAreaDiv100, 
+         "Nb. de feux de circul. / Longueur routes OSM sommées * 100"=fC_divRoutesTimes100, 
+         "Nb. de panneaux d'arrêt / Longueur routes OSM sommées * 100"=stop_divRoutesTimes100, 
+         "Nb. de feux de circul. / Superficie "=fC_divArea, 
+         "Nb. de panneaux d'arrêt / Superficie "=stop_divArea, 
+         "Nombre d'hôpitaux / Superficie * 10"=hosp_divAreaTimes10) %>% 
+  stargazer(., type="text", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+```
+
+```{r}
+# tab: cancensus_mun_resume
+tab_resume_mun_cc <- acc_PA_mun %>%
+  filter(An==2020, gravite=="Mortel") %>%
+  data.frame() %>% 
+  select("Population (2021)"=Pplt_21, 
+         "Densité de population"=pp_dnst, 
+         "Moins de 5 ans"=mns_5An, 
+         "Femmes"=femmes, "Jeunes"=jeunes, 
+         "65 ans et plus"=a65_pls, 
+         "Baccalauréat et plus"=Bcc_pls, 
+         "Secondaire et moins"=scndr_m, 
+         "Chômeurs"=chomers, 
+         "Revenu médian par ménage"=rvn_md_, 
+         "Bénéficiaires de prestations de COVID-19"=C19_bnf, 
+         "Densité de population/100"=pp_dnst_div100, 
+         "% de moins de 5 ans"=mns_5An_divPopuTimes100, 
+         "% de femmes"=femmes_divPopuTimes100, 
+         "% de jeunes"=jeunes_divPopuTimes100, 
+         "% de 65 ans et plus"=a65_pls_divPopuTimes100, 
+         "% de bacheliers et plus"=Bcc_pls_divPopuTimes100, 
+         "% de personnes ayant un secondaire ou moins"=scndr_m_divPopuTimes100, 
+         "% de chômeurs"=chomers_divPopuTimes100, 
+         "Revenu médian/10000"=rvn_md_div10000, 
+         "% de bénéficiaires de prestations de COVID-19"=C19_bnf_divPopuTimes100) %>% 
+  stargazer(., type="text", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+
+# tab: cancensus_mrc_resume ####
+tab_resume_mrc_cc <- acc_PA_mrc %>%
+  filter(An==2020, gravite=="Mortel") %>%
+  data.frame() %>% 
+  select("Population (2021)"=Pplt_21, 
+         "Densité de population"=pp_dnst, 
+         "Moins de 5 ans"=mns_5An, 
+         "Femmes"=femmes, "Jeunes"=jeunes, 
+         "65 ans et plus"=a65_pls, 
+         "Baccalauréat et plus"=Bcc_pls, 
+         "Secondaire et moins"=scndr_m, 
+         "Chômeurs"=chomers, 
+         "Revenu médian par ménage"=rvn_md_, 
+         "Bénéficiaires de prestations de COVID-19"=C19_bnf, 
+         "Densité de population/100"=pp_dnst_div100, 
+         "% de moins de 5 ans"=mns_5An_divPopuTimes100, 
+         "% de femmes"=femmes_divPopuTimes100, 
+         "% de jeunes"=jeunes_divPopuTimes100, 
+         "% de 65 ans et plus"=a65_pls_divPopuTimes100, 
+         "% de bacheliers et plus"=Bcc_pls_divPopuTimes100, 
+         "% de personnes ayant un secondaire ou moins"=scndr_m_divPopuTimes100, 
+         "% de chômeurs"=chomers_divPopuTimes100, 
+         "Revenu médian/10000"=rvn_md_div10000, 
+         "% de bénéficiaires de prestations de COVID-19"=C19_bnf_divPopuTimes100) %>% 
+  stargazer(., type="latex", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+
+tab_resume_mrc_cc_PM <- acc_PM_mrc %>%
+  filter(An==2020, gravite=="Mortel", Mois==12) %>%
+  data.frame() %>% 
+  select("Population (2021)"=Pplt_21, 
+         "Centaines de personnes par kilomètre carré"=pp_dnst, 
+         "Moins de 5 ans"=mns_5An, 
+         "Femmes"=femmes, "Jeunes"=jeunes, 
+         "65 ans et plus"=a65_pls, 
+         "Baccalauréat et plus"=Bcc_pls, 
+         "Secondaire et moins"=scndr_m, 
+         "Chômeurs"=chomers, 
+         "Revenu médian par ménage"=rvn_md_, 
+         "Bénéficiaires de prestations de COVID-19"=C19_bnf, 
+         "Densité de population/100"=pp_dnst_div100, 
+         "% de moins de 5 ans"=mns_5An_divPopuTimes100, 
+         "% de femmes"=femmes_divPopuTimes100, 
+         "% de jeunes"=jeunes_divPopuTimes100, 
+         "% de 65 ans et plus"=a65_pls_divPopuTimes100, 
+         "% de bacheliers et plus"=Bcc_pls_divPopuTimes100, 
+         "% de personnes ayant un secondaire ou moins"=scndr_m_divPopuTimes100, 
+         "% de chômeurs"=chomers_divPopuTimes100, 
+         "Revenu médian/10000"=rvn_md_div10000, 
+         "% de bénéficiaires de prestations de COVID-19"=C19_bnf_divPopuTimes100) %>% 
+  stargazer(., type="latex", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+```
+
+
+Pourquoi les femmes sont moins de 50%?
+```{r}
+acc_PA_mun %>%
+  filter(An==2020, gravite=="Mortel", Pplt_21==0)
+  
+  acc_PA_mun %>%
+  filter(An==2020, gravite=="Mortel") %>%
+  summarise(sum(.$femmes)/sum(.$Pplt_21))
+
+acc_PA_mrc %>%
+  filter(An==2020, gravite=="Mortel") %>%
+  summarise(sum(.$femmes)/sum(.$Pplt_21))
+```
+On voit que les femmes sont un tout petit peu majoritaires, ce qui les ram'ene plus bas du 50% dans les moyennes sont les municipalités sans population, où les femmes ont été ajustés.
+
+
+# Corrélation
+```{r}
+library(spatialreg)
+library(SpatialEpi)
+library(reshape)
+acc_PA_mun_M <- acc_PA_mun %>% filter(gravite=="Mortel")
+acc_PA_mrc_M <- acc_PA_mrc %>% filter(gravite=="Mortel")
+
+acc_PA_mun_M <- acc_PA_mun_M %>% 
+  filter(gravite=="Mortel") %>%
+  mutate(E_vkt=expected(population=vktPopu, cases=nbAcc, n.strata = 1), E_djma=expected(population=djmaPopu, cases=nbAcc, n.strata = 1))
+
+
+acc_PA_mrc_M <- acc_PA_mrc %>%
+  filter(gravite=="Mortel") %>%
+  mutate(E_vkt=expected(population=vktPopu, cases=nbAcc, n.strata = 1), E_djma=expected(population=djmaPopu, cases=nbAcc, n.strata = 1))
+
+acc_PA_mun_M$fC_divRoutesTimes100
+
+df_mun <- acc_PA_mun_M %>% filter (An == 2022) %>%
+  select(motorway_divAreaDiv100, 
+         trunk_divAreaDiv100,
+         primary_divAreaDiv100,
+         secondary_divAreaDiv100, 
+         tertiary_divAreaDiv100, 
+         sommeRoute_divAreaDiv100,
+         routeQc_divAreaDiv100, 
+         fC_divArea, 
+         stop_divArea,
+         fCStopPond_divArea,
+         hosp_divAreaTimes10,
+         pp_dnst_div100, 
+         mns_5An_divPopuTimes100, 
+         femmes_divPopuTimes100,
+         jeunes_divPopuTimes100, 
+         a65_pls_divPopuTimes100, 
+         Bcc_pls_divPopuTimes100, 
+         scndr_m_divPopuTimes100,
+         chomers_divPopuTimes100,
+         C19_bnf_divPopuTimes100,
+         rvn_md_div10000, 
+         ptsMoy,
+         VITESSE_AUTOR,
+         E_djma, 
+         E_vkt, 
+         nbAcc)
+
+cor_matrix <- cor(df_mun)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(cor_upper > abs(0.7), arr.ind = TRUE)
+result_mun <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+stargazer(result_mun, type="text", summary=F)
+
+
+# Melt the matrix into long format
+cor_melt <- melt(cor_matrix)
+
+# Plot the heatmap
+cor_mun <- ggplot(cor_melt, aes(x = X1, y = X2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                       limit = c(-1, 1), space = "Lab", name = "Corrélation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  coord_fixed() +
+  labs(x = NULL, y = NULL, title="Municipalité") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  ) 
+
+
+df_mrc <- acc_PA_mrc_M %>% filter (An == 2022) %>%
+  select(motorway_divAreaDiv100,     #
+         trunk_divAreaDiv100,       #
+         primary_divAreaDiv100,     #
+         secondary_divAreaDiv100,   #
+         tertiary_divAreaDiv100,    #
+         sommeRoute_divAreaDiv100,  #
+         routeQc_divAreaDiv100, 
+         fC_divArea,                #
+         stop_divArea,              #
+         fCStopPond_divArea,
+         hosp_divAreaTimes10,
+         pp_dnst_div100, 
+         mns_5An_divPopuTimes100, 
+         femmes_divPopuTimes100,
+         jeunes_divPopuTimes100, 
+         a65_pls_divPopuTimes100, 
+         Bcc_pls_divPopuTimes100, 
+         scndr_m_divPopuTimes100,
+         chomers_divPopuTimes100,
+         C19_bnf_divPopuTimes100,
+         rvn_md_div10000, 
+         ptsMoy,
+         VITESSE_AUTOR,
+         E_djma, 
+         E_vkt, 
+         nbAcc)
+
+
+cor_matrix <- cor(df_mrc)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(cor_upper > abs(0.7), arr.ind = TRUE)
+result_mrc <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+result_mrc
+
+# Melt the matrix into long format
+cor_melt <- melt(cor_matrix)
+
+# Plot the heatmap
+cor_mrc <- ggplot(cor_melt, aes(x = X1, y = X2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                       limit = c(-1, 1), space = "Lab", name = "Corrélation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  coord_fixed() +
+  labs(x = NULL, y = NULL, title="MRC") +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  ) 
+
+# fig: correlation ####
+ggarrange(cor_mun, cor_mrc)
+```
+
+En excluant
+
+```{r}
+cor_mun <- acc_PA_mun_M %>% filter (An == 2022, gravite=="Mortel") %>%
+  select(#motorway_divAreaDiv100, 
+         #trunk_divAreaDiv100,
+         #primary_divAreaDiv100,
+         #secondary_divAreaDiv100, 
+         #tertiary_divAreaDiv100, 
+         #sommeRoute_divAreaDiv100,
+         routeQc_divAreaDiv100, 
+         #fC_divArea, 
+         #stop_divArea,
+         fCStopPond_divArea,
+         #hosp_divAreaTimes10,
+         #pp_dnst_div100, 
+         mns_5An_divPopuTimes100, 
+         femmes_divPopuTimes100,
+         jeunes_divPopuTimes100, 
+         a65_pls_divPopuTimes100, 
+         Bcc_pls_divPopuTimes100, 
+         scndr_m_divPopuTimes100,
+         chomers_divPopuTimes100,
+         C19_bnf_divPopuTimes100,
+         rvn_md_div10000, 
+         ptsMoy,
+         VITESSE_AUTOR,
+         E_djma, 
+         E_vkt, 
+         nbAcc)
+
+cor_matrix <- cor(cor_mun)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(cor_upper > abs(0.7), arr.ind = TRUE)
+result_mun <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+result_mun
+
+cor_mrc <- acc_PA_mrc_M %>% filter (An == 2014, gravite=="Mortel") %>%
+  select(#motorway_divAreaDiv100, 
+         #trunk_divAreaDiv100,
+         #primary_divAreaDiv100,
+         #secondary_divAreaDiv100, 
+         #tertiary_divAreaDiv100, 
+         #sommeRoute_divAreaDiv100,
+         routeQc_divAreaDiv100, 
+         fC_divArea,
+         stop_divArea,
+         fCStopPond_divArea,
+         hosp_divAreaTimes10,
+         pp_dnst_div100,
+         mns_5An_divPopuTimes100, 
+         femmes_divPopuTimes100,
+         jeunes_divPopuTimes100, 
+         a65_pls_divPopuTimes100, 
+         Bcc_pls_divPopuTimes100, 
+         scndr_m_divPopuTimes100,
+         chomers_divPopuTimes100,
+         C19_bnf_divPopuTimes100,
+         rvn_md_div10000, 
+         ptsMoy,
+         VITESSE_AUTOR,
+         E_djma, 
+         E_vkt, 
+         nbAcc)
+
+
+cor_matrix <- cor(cor_mrc)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(cor_upper > abs(0.7), arr.ind = TRUE)
+result_mrc <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+result_mrc
+
+
+cor_mrc <- acc_PA_mrc_M %>% filter (gravite=="Mortel") %>%
+  select(#motorway_divAreaDiv100, 
+         #trunk_divAreaDiv100,
+         #primary_divAreaDiv100,
+         #secondary_divAreaDiv100, 
+         #tertiary_divAreaDiv100, 
+         #sommeRoute_divAreaDiv100,
+         routeQc_divAreaDiv100, 
+         # fC_divArea, 
+         # stop_divArea,
+         # fCStopPond_divArea,
+         # hosp_divAreaTimes10,
+         # pp_dnst_div100,
+         mns_5An_divPopuTimes100, 
+         femmes_divPopuTimes100,
+         jeunes_divPopuTimes100, 
+         a65_pls_divPopuTimes100, 
+         Bcc_pls_divPopuTimes100, 
+         scndr_m_divPopuTimes100,
+         chomers_divPopuTimes100,
+         C19_bnf_divPopuTimes100,
+         rvn_md_div10000, 
+         ptsMoy,
+         VITESSE_AUTOR,
+         E_djma, 
+         E_vkt, 
+         nbAcc)
+
+
+cor_matrix <- cor(cor_mrc)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(cor_upper > abs(0.7), arr.ind = TRUE)
+result_mrc <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+result_mrc
+```
+
+# JdD résumé
+
+```{r}
+# library(readxl)
+# nouvNom <- read_excel("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Redaction/Figures/variables presentations.xlsx")
+# rename_vector <- setNames(nouvNom$anciensNom, nouvNom$Variables)
+# 
+# acc_PA_mun_M <- acc_PA_mun_M %>%
+#   dplyr::rename(!!!rename_vector)
+# acc_PA_mrc_M <- acc_PA_mrc_M %>%
+#   dplyr::rename(!!!rename_vector)
+# 
+# acc_PA_mun_M %>%
+#   select(denistéLinéaire_routesMTMD,
+#          pourcentage_moins5Ans,
+#          pourcentage_femmes,
+#          pourcentage_jeunes,
+#          pourcentage_65AnsEtPlus,
+#          pourcentage_baccalaureatOuPlus,
+#          pourcentage_secondaireOuMoins,
+#          pourcentage_chomeurs,
+#          pourcentage_beneficiairesPrestationsCOVID19,
+#          revenuMedian,
+#          ptsMoyens,
+#          vitesseAutorisee,
+#          nombreAccidents_DJMA,
+#          nombreAccidents_VKT, 
+#          nombreAccidents) %>%
+#   data.frame %>%
+#   stargazer(., type="latex", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+# 
+# acc_PA_mrc_M %>%
+#   select(denistéLinéaire_routesMTMD,
+#          pourcentage_moins5Ans,
+#          pourcentage_femmes,
+#          pourcentage_jeunes,
+#          pourcentage_65AnsEtPlus,
+#          pourcentage_baccalaureatOuPlus,
+#          pourcentage_secondaireOuMoins,
+#          pourcentage_chomeurs,
+#          pourcentage_beneficiairesPrestationsCOVID19,
+#          revenuMedian,
+#          ptsMoyens,
+#          vitesseAutorisee,
+#          nombreAccidents_DJMA,
+#          nombreAccidents_VKT, 
+#          nombreAccidents) %>%
+#   data.frame %>%
+#   stargazer(., type="text", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+
+```
+
+
+
+# Moran's I
+
+```{r}
+load(file.path(pathTraitees, "muncp_cc_cov.Rda"))
+load(file.path(pathTraitees, "mrc_cc_cov.Rda"))
+
+load(file.path(pathTraitees, "acc_PA_mrc.Rda"))
+load(file.path(pathTraitees, "acc_PA_mun.Rda"))
+load(file.path(pathTraitees, "acc_PM_mrc.Rda"))
+
+load(file.path(pathTraitees, "nb_mun.Rda"))
+load(file.path(pathTraitees, "nb_mrc.Rda"))
+
+nb_mun_maj
+nb_mrc_maj
+
+lw_mun_w <- nb2listw(nb_mun_maj, style = "W", zero.policy = T)
+lw_mrc_w <- nb2listw(nb_mrc_maj, style = "W", zero.policy = T)
+
+library(spdep)
+gmoran_mun_pre <- moran.test(acc_PA_mun %>% filter(gravite=="Mortel", ind_covid=="Pre-Covid") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mun_w,
+                     alternative = "two.sided")
+gmoran_mun_post <- moran.test(acc_PA_mun %>% filter(gravite=="Mortel", ind_covid=="Post-Covid") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mun_w,
+                     alternative = "two.sided")
+
+
+gmoran_mrc_pre <- moran.test(acc_PA_mrc %>% filter(gravite=="Mortel", ind_covid=="Pre-Covid") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mrc_w,
+                     alternative = "two.sided")
+gmoran_mrc_post <- moran.test(acc_PA_mrc %>% filter(gravite=="Mortel", ind_covid=="Post-Covid") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mrc_w,
+                     alternative = "two.sided")
+
+
+gmoran_mun <- moran.test(acc_PA_mun %>% filter(gravite=="Mortel") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc), ) %>% .$nbAcc, lw_mun_w,
+                     alternative = "two.sided")
+gmoran_mrc <- moran.test(acc_PA_mrc %>% filter(gravite=="Mortel") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mrc_w,
+                     alternative = "two.sided")
+
+gmoran_mun_G <- moran.test(acc_PA_mun %>% filter(gravite=="Grave") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mun_w,
+                     alternative = "two.sided")
+gmoran_mrc_G <- moran.test(acc_PA_mrc %>% filter(gravite=="Grave") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mrc_w,
+                     alternative = "two.sided")
+gmoran_mun_L <- moran.test(acc_PA_mun %>% filter(gravite=="Léger") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mun_w,
+                     alternative = "two.sided")
+gmoran_mrc_L <- moran.test(acc_PA_mrc %>% filter(gravite=="Léger") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc, lw_mrc_w,
+                     alternative = "two.sided")
+
+
+moran_i <- t(data.frame(gmoran_mun_L$estimate[1],
+            gmoran_mrc_L$estimate[1], 
+            gmoran_mun_G$estimate[1], 
+            gmoran_mrc_G$estimate[1],
+            gmoran_mun$estimate[1], 
+            gmoran_mrc$estimate[1], 
+            NA, 
+            gmoran_mun_pre$estimate[1], 
+            gmoran_mun_post$estimate[1],
+            gmoran_mrc_pre$estimate[1],
+            gmoran_mrc_post$estimate[1]))
+
+pval_i <- c(gmoran_mun_L$p.value,
+            gmoran_mrc_L$p.value, 
+            gmoran_mun_G$p.value, 
+            gmoran_mrc_G$p.value,
+            gmoran_mun$p.value, 
+            gmoran_mrc$p.value, 
+            NA, 
+            gmoran_mun_pre$p.value, 
+            gmoran_mun_post$p.value,
+            gmoran_mrc_pre$p.value,
+            gmoran_mrc_post$p.value)
+#, gmoran_mun_pre_greater$p.value, gmoran_mun_post_greater$p.value, gmoran_mrc_pre_greater$p.value, gmoran_mrc_post_greater$p.value)
+
+df <- data.frame(matrix(cbind(round(moran_i,2), formatC(pval_i, format = "e", digits = 2)), ncol=2))
+colnames(df) <- c("I de Moran global", "Valeur-p") #, "H0: Aucune autocorrélation spatiale positive")
+Gravité <- c("Léger", "Léger", "Grave", "Grave", "Mortel", "Mortel", NA, "Mortel", "Mortel", "Mortel", "Mortel")
+Période <- c("2014-2022", "2014-2022", "2014-2022", "2014-2022", "2014-2022", "2014-2022", NA, "2014-2019", "2020-2022", "2014-2019", "2020-2022")
+Région <- c("Municipalité", "MRC", "Municipalité", "MRC", "Municipalité", "MRC", NA, "Municipalité", "Municipalité", "MRC", "MRC")
+
+df_final <- cbind(Région, Gravité, Période, df)
+
+# df$descr <- c("Accidents légers annuels des municipalités 2014-2022",
+#               "Accidents légers annuels des MRC 2014-2022",
+#               "Accidents graves annuels des municipalités 2014-2022",
+#               "Accidents graves annuels des MRC 2014-2022", 
+#               "Accidents mortels annuels des municipalités 2014-2022", 
+#               "Accidents mortels annuels des MRC 2014-2022",
+#               NA,
+#               "Accidents mortels annuels des municipalités pré-Covid", 
+#               "Accidents mortels annuels des municipalités post-Covid",
+#               "Accidents mortels annuels des MRC pre-Covid",
+#               "Accidents mortels annuels des MRC post-Covid")
+
+
+# tab: moranGlob ####
+stargazer(df_final, type="latex", summary=F, rownames=F)
+round(pval_i,3)
+
+```
+
+
+## Indice I local
+```{r}
+
+pva <- function(pv) cbind("$I$ local significatif" = pv, 
+    "FDR" = p.adjust(pv, "fdr"), "BY" = p.adjust(pv, "BY"),
+    "Bonferroni" = p.adjust(pv, "bonferroni"))
+f <- function(x) sum(x < 0.05, na.rm = T)
+ajust.locM_g <- function(lmoran){
+  lmoran |> 
+      subset(select = "Pr(z > E(Ii))", drop = TRUE) |> 
+      pva() -> pvsp
+  apply(pvsp, 2, f)
+}
+ajust.locM <- function(lmoran){
+  lmoran |> 
+      subset(select = "Pr(z != E(Ii))", drop = TRUE) |> 
+      pva() -> pvsp
+  apply(pvsp, 2, f)
+}
+
+
+
+map_mun_pre <- muncp_cc_cov
+map_mun_pre$nbAcc <- acc_PA_mun %>% filter(gravite=="Mortel", ind_covid=="Pre-Covid") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mun_pre <- localmoran(map_mun_pre$nbAcc, lw_mun_w)
+
+map_mrc_pre <- mrc_cc_cov
+map_mrc_pre$nbAcc <- acc_PA_mrc %>% filter(gravite=="Mortel", ind_covid=="Pre-Covid") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mrc_pre <- localmoran(map_mrc_pre$nbAcc, lw_mrc_w)
+
+map_mun_post <- muncp_cc_cov
+map_mun_post$nbAcc <- acc_PA_mun %>% filter(gravite=="Mortel", ind_covid=="Post-Covid") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mun_post <- localmoran(map_mun_post$nbAcc, lw_mun_w)
+
+map_mrc_post <- mrc_cc_cov
+map_mrc_post$nbAcc <- acc_PA_mrc %>% filter(gravite=="Mortel", ind_covid=="Post-Covid") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mrc_post <- localmoran(map_mrc_post$nbAcc, lw_mrc_w)
+
+map_mun_M <- muncp_cc_cov
+map_mun_M$nbAcc <- acc_PA_mun %>% filter(gravite=="Mortel") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mun_M <- localmoran(map_mun_pre$nbAcc, lw_mun_w)
+map_mrc_M <- mrc_cc_cov
+map_mrc_M$nbAcc <- acc_PA_mrc %>% filter(gravite=="Mortel") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mrc_M <- localmoran(map_mrc_M$nbAcc, lw_mrc_w)
+
+map_mun_G <- muncp_cc_cov
+map_mun_G$nbAcc <- acc_PA_mun %>% filter(gravite=="Grave") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mun_G <- localmoran(map_mun_pre$nbAcc, lw_mun_w)
+map_mrc_G <- mrc_cc_cov
+map_mrc_G$nbAcc <- acc_PA_mrc %>% filter(gravite=="Grave") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mrc_G <- localmoran(map_mrc_G$nbAcc, lw_mrc_w)
+
+map_mun_L <- muncp_cc_cov
+map_mun_L$nbAcc <- acc_PA_mun %>% filter(gravite=="Léger") %>% group_by(CD_MUN) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mun_L <- localmoran(map_mun_pre$nbAcc, lw_mun_w)
+map_mrc_L <- mrc_cc_cov
+map_mrc_L$nbAcc <- acc_PA_mrc %>% filter(gravite=="Léger") %>% group_by(CD_MRC) %>% summarise(nbAcc=sum(nbAcc)) %>% .$nbAcc
+lmoran_mrc_L <- localmoran(map_mrc_L$nbAcc, lw_mrc_w)
+
+
+diagM_mun_M <- moran.plot(map_mun_M$nbAcc, lw_mun_w, xlab = "I round turnout", 
+               ylab = "lagged turnout", main="Standardisé par rangée")
+diagM_mrc_M <- moran.plot(map_mrc_M$nbAcc, lw_mrc_w, xlab = "I round turnout", 
+               ylab = "lagged turnout", main="Standardisé par rangée")
+
+table(diagM_mun_M$is_inf)
+table(diagM_mrc_M$is_inf)
+
+p_diagMunM <- ggplot(diagM_mun_M) +
+  geom_point(aes(x=x, y=wx)) + 
+  geom_hline(yintercept = mean(diagM_mun_M$wx),linetype = 2) +
+  geom_vline(xintercept = mean(diagM_mun_M$x),linetype = 2) +
+  geom_abline(intercept= lm(wx~x, diagM_mun_M)$coefficients[1], slope= lm(wx~x, diagM_mun_M)$coefficients[2]) +
+  geom_point(data= diagM_mun_M[diagM_mun_M$is_inf==T,], mapping=aes(x=x, y=wx), colour="red", size=2) + 
+  labs(x = "Nombre d'accidents mortels par municipalités", y = "Moyenne lissée spatialement") +
+  ggtitle("Diagramme de Moran du nombre d'accidents \nmortels par municipalités") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"))
+
+p_diagMrcM <- ggplot(diagM_mrc_M) +
+  geom_point(aes(x=x, y=wx)) + 
+  geom_hline(yintercept = mean(diagM_mrc_M$wx),linetype = 2) +
+  geom_vline(xintercept = mean(diagM_mrc_M$x),linetype = 2) +
+  geom_abline(intercept= lm(wx~x, diagM_mrc_M)$coefficients[1], slope= lm(wx~x, diagM_mrc_M)$coefficients[2]) +
+  geom_point(data= diagM_mrc_M[diagM_mrc_M$is_inf==T,], mapping=aes(x=x, y=wx), colour="red", size=2) + 
+  labs(x = "Nombre d'accidents mortels par MRC", y = "Moyenne lissée spatialement") +
+  ggtitle("Diagramme de Moran du nombre d'accidents \nmortels par MRC") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold"))
+  
+map_mun_M$is_inf <- diagM_mun_M$is_inf
+map_mrc_M$is_inf <- diagM_mrc_M$is_inf
+inf_mun <- ggplot(map_mun_M) +
+  geom_sf(aes(fill=is_inf)) +
+  scale_fill_viridis("magma",discrete=TRUE) +
+  ggtitle("Valeurs extrêmes (points rouges) \npar municipalité sur une carte") +
+  guides(fill=guide_legend(title="Valeurs extrêmes")) +
+  theme(plot.title = element_text(hjust = 0.5, face="bold")) +
+  xlim(-80, -68) + ylim(45, 49) +
+  theme(legend.position = "none")
+inf_mrc <- ggplot(map_mrc_M) +
+  geom_sf(aes(fill=is_inf)) +
+  scale_fill_viridis("magma",discrete=TRUE) +
+  ggtitle("Valeurs extrêmes (points rouges) \npar MRC sur une carte") +
+  guides(fill=guide_legend(title="Valeurs extrêmes")) +
+  theme(plot.title = element_text(hjust = 0.5, face="bold")) +
+  xlim(-76, -70) + ylim(45, 47.5) +
+  theme(legend.position = "none")
+
+# fig: diagMoran_nbAcc ####
+ggarrange(p_diagMunM, inf_mun, p_diagMrcM, inf_mrc)
+
+
+ajust.locM(lmoran_mun_M)
+ajust.locM(lmoran_mun_G)
+ajust.locM(lmoran_mun_L)
+
+
+ajust.locM(lmoran_mrc_M); ajust.locM(lmoran_mrc_pre); ajust.locM(lmoran_mrc_post)
+
+ajust.locM(lmoran_mrc_G)
+ajust.locM(lmoran_mrc_L)
+
+test <- data.frame(lmoran_mrc_M)
+table(test$Pr.z....E.Ii.. >= 0.05)
+
+df <- t(data.frame(mun_M=ajust.locM(lmoran_mun_M), mun_G=ajust.locM(lmoran_mun_G), mun_L=ajust.locM(lmoran_mun_L), mrc_M=ajust.locM(lmoran_mrc_M), mrc_G=ajust.locM(lmoran_mrc_G), mrc_L=ajust.locM(lmoran_mrc_L)))
+
+Gravité <- c("Mortel", "Grave", "Léger", "Mortel", "Grave", "Léger")
+# Période <- c("2014-2022", "2014-2022", "2014-2022", "2014-2022", "2014-2022", "2014-2022", NA, "2014-2019", "2020-2022", "2014-2019", "2020-2022")
+Région <- c("Municipalité", "Municipalité", "Municipalité", "MRC", "MRC", "MRC")
+
+df_final <- cbind(Gravité, Région, df)
+# rownames(df) <- c("Accidents mortels annuels des municipalités 2014-2022",
+                  # "Accidents graves annuels des municipalités 2014-2022",
+                  # "Accidents légers annuels des municipalités 2014-2022",
+                  # "Accidents mortels annuels des MRC 2014-2022", 
+                  # "Accidents graves annuels des MRC 2014-2022", 
+                  # "Accidents légers annuels des MRC 2014-2022")
+
+# tab: moranLoc
+stargazer(df_final[,1:4], type="latex", summary=F, rownames = F)
+
+
+# verif
+  sum(map_mun_pre$nbAcc) + sum(map_mun_post$nbAcc) 
+  sum(map_mun_pre$nbAcc) + sum(map_mrc_post$nbAcc) 
+
+library(tmap)
+tmap_mode("view")
+
+
+map_mun_pre$lmZ <- lmoran_mun_pre[, "Z.Ii"] # z-scores
+map_mrc_pre$lmZ <- lmoran_mrc_pre[, "Z.Ii"] # z-scores
+map_mun_post$lmZ <- lmoran_mun_post[, "Z.Ii"] # z-scores
+map_mrc_post$lmZ <- lmoran_mrc_post[, "Z.Ii"] # z-scores
+map_mun_post$lmZ <- lmoran_mun_post[, "Z.Ii"] # z-scores
+map_mrc_post$lmZ <- lmoran_mrc_post[, "Z.Ii"] # z-scores
+map_mun_M$lmZ <- lmoran_mun_M[, "Z.Ii"] # z-scores
+map_mrc_M$lmZ <- lmoran_mrc_M[, "Z.Ii"] # z-scores
+
+
+p_mun_pre <- tm_shape(map_mun_pre) + 
+  tm_polygons(col = "lmZ",
+    title = "Municipalité - PréCovid", style = "fixed",
+    breaks = c(-Inf, -1.96, 1.96, Inf),
+    labels = c("ACS négative", "Aucune ACS", "ACS positive "),
+    palette =  c("blue", "white", "red"),
+    id="MUS_NM_MUN") +
+  tm_layout(legend.outside = TRUE) 
+
+p_mrc_pre <- tm_shape(map_mrc_pre) + 
+  tm_polygons(col = "lmZ",
+    title = "MRC - PréCovid", 
+    style = "fixed",
+    breaks = c(-Inf, -1.96, 1.96, Inf),
+    labels = c("ACS négative", "Aucune ACS", "ACS positive"),
+    palette =  c("blue", "white", "red"),
+    id="MRS_NM_MRC") +
+  tm_layout(legend.outside = TRUE) 
+
+p_mun_post <- tm_shape(map_mun_post) + 
+  tm_polygons(col = "lmZ",
+    title = "Municipalité - PostCovid", style = "fixed",
+    breaks = c(-Inf, -1.96, 1.96, Inf),
+    labels = c("ACS négative", "Aucune ACS", "ACS positive "),
+    palette =  c("blue", "white", "red"),
+    id="MUS_NM_MUN") +
+  tm_layout(legend.outside = TRUE) 
+
+p_mrc_post <- tm_shape(map_mrc_post) + 
+  tm_polygons(col = "lmZ",
+    title = "Municipalité - PréCovid", 
+    style = "fixed",
+    breaks = c(-Inf, -1.96, 1.96, Inf),
+    labels = c("ACS négative", "Aucune ACS", "ACS positive"),
+    palette =  c("blue", "white", "red"),
+    id="MRS_NM_MRC") +
+  tm_layout(legend.outside = TRUE) #+
+  # tm_view(view.legend.position = c("left", "top"))
+
+p_mun <- tm_shape(map_mun_M) + 
+  tm_polygons(col = "lmZ",
+    title = "Municipalité", style = "fixed",
+    breaks = c(-Inf, -1.96, 1.96, Inf),
+    labels = c("ACS négative", "Aucune ACS", "ACS positive "),
+    palette =  c("blue", "white", "red"),
+    id="MUS_NM_MUN") +
+  tm_layout(legend.outside = TRUE) 
+
+p_mrc <- tm_shape(map_mrc_M) + 
+  tm_polygons(col = "lmZ",
+    title = "MRC", 
+    style = "fixed",
+    breaks = c(-Inf, -1.96, 1.96, Inf),
+    labels = c("ACS négative", "Aucune ACS", "ACS positive"),
+    palette =  c("blue", "white", "red"),
+    id="MRS_NM_MRC") +
+  tm_layout(legend.outside = TRUE)
+
+tmap_arrange(p_mun_pre, p_mun_post, p_mrc_pre, p_mrc_post, sync=T, ncol=2)
+# fig: acs local ####
+tmap_arrange(p_mun, p_mrc, sync=T)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

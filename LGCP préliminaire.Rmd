@@ -1,0 +1,642 @@
+---
+title: "SPP-LGCP"
+author: "Edgar Lanoue"
+date: "2024-05-30"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Figures
+fig: L mtl SPP
+fig: spp_cc_CTvDA
+fig: spp_mtl den
+fig: density mT
+
+# Tableaux
+tab: osm_spp_resume
+tab: cc_spp_resume
+tab: cmm_spp_resume
+
+###########################
+
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+library(spatstat)
+library(ggpubr)
+library(fields)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+library(patchwork)
+
+library(viridis)
+library(stargazer)
+```
+
+
+# Importation Cancensus pour municipalités et MRC
+```{r}
+qc_bb <- getbb("Quebec")
+mtl_bb <- getbb("Montreal")
+
+# Polygone de la province du Qc
+qc_poly <- getbb(place_name = "Quebec", format_out = "polygon", limit=1)
+
+# Le premier de la liste est effectivement la province, les autres sont des iles loin au Nord
+  qc_poly <- st_polygon(list(qc_poly[[1]]))
+  qc_poly <- st_sf(geometry = st_sfc(qc_poly), crs = crs)
+
+mtl_poly <- read_sf(file.path(pathBrutesWeb, "cancensus", "mtl_poly.shp"))
+mtl_poly
+mtl_poly <- st_transform(mtl_poly, crs = projUTM)
+
+# Sépare les 4 îles en différents polygones
+mtlpoly_4 <- st_cast(mtl_poly, "POLYGON")
+mtlIle_mesh <- inla.mesh.2d(boundary = mtlpoly_4, max.edge = 2, cutoff = 1, crs=projUTM)  #2,1
+plot(mtlIle_mesh)
+
+```
+
+
+# Importons les données
+```{r}
+load(file.path(pathTraitees, "df_spp.Rda"))
+load(file.path(pathTraitees, "mtl_cc_cov_CT.Rda"))
+load(file.path(pathTraitees, "mtl_cc_cov_DA.Rda"))
+
+load(file.path(pathTraitees, "mtl_M.Rda"))
+load(file.path(pathTraitees, "mtl_G.Rda"))
+load(file.path(pathTraitees, "mtl_L.Rda"))
+
+
+diff_days <- as.numeric(date("2021-12-31") - date("2020-03-13"))
+date_ini <- date("2019-12-31") - diff_days 
+
+mtl_M <- mtl_M %>%
+  mutate(ind_covid=0) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN > date_ini & DT_ACCDN < date("2019-12-31"), 1, ind_covid)) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN > date("2020-03-13"),2, ind_covid))
+
+mtl_G <- mtl_G %>%
+  mutate(ind_covid=0) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN > date_ini & DT_ACCDN < date("2019-12-31"), 1, ind_covid)) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN > date("2020-03-13"),2, ind_covid))
+
+
+mtl_M %>% filter(ind_covid==1) %>% dim()
+mtl_M %>% filter(ind_covid==2) %>% dim()
+mapview(mtl_M %>% filter(ind_covid==1), col.region="red", cex=2) + mapview(mtl_M %>% filter(ind_covid==2), col.region="blue", cex=2) 
+
+
+# Ind pre/post covid - 2020
+mtl_M_post <- mtl_M %>% filter(DT_ACCDN > date("2020-03-13")) 
+mtl_M_pre <- mtl_M %>% filter(DT_ACCDN <= date("2020-03-13")) 
+mtl_G_post <- mtl_G %>% filter(DT_ACCDN > date("2020-03-13")) 
+mtl_G_pre <- mtl_G %>% filter(DT_ACCDN <= date("2020-03-13")) 
+mtl_L_post <- mtl_L %>% filter(DT_ACCDN > date("2020-03-13")) 
+mtl_L_pre <- mtl_L %>% filter(DT_ACCDN <= date("2020-03-13")) 
+
+mapview(mtl_M, cex=2)
+
+
+# length(mtl_L$NO_SEQ_COL)
+# length(unique(mtl_L$NO_SEQ_COL))
+
+mtl_M %>% group_by(AN) %>%
+  summarise(nbAcc=length(NO_SEQ_COL)) %>%
+  st_drop_geometry() %>% plot()
+```
+
+# Annalyse Préliminaire
+## Density des MPS - Analyse préliminaires
+```{r}
+hex <- c("darkred", "red", "orange", "yellow", "green", "cyan", "blue", "darkblue")
+plot_den <- function(den){
+  df <- data.frame(Intensité = as.vector(den$v), x=rep(den$xcol, each=den$dim[1]), y=rep(den$yrow, den$dim[2]))
+ggplot(df) +
+  geom_tile(aes(x=x, y=y, fill=Intensité)) +
+  scale_fill_gradientn(na.value="white", colours = rev(hex)) + 
+  theme_void() + 
+  theme(
+    legend.margin = margin(10, 5, 0, 10),  # Adjust legend margins (top, right, bottom, left)
+    # panel.border = element_rect(color = "black", fill = NA, size = 1)
+  )
+}
+ratio_1Sur2 <- function(sf_pts1, sf_pts2, titre){
+  den_1 <- density(as.ppp(st_coordinates(sf_pts1), mtlpoly_4))
+  den_2 <- density(as.ppp(st_coordinates(sf_pts2), mtlpoly_4))
+  if(attr(den_1, "sigma") == attr(den_2, "sigma")){
+    alphahat <- dim(sf_pts2)[1]/dim(sf_pts1)[1]
+    rr <- t(alphahat * den_1$v)/t(den_2$v)
+    df <- data.frame(`RatioIntensité` = as.vector(t(rr)), x=rep(den_1$xcol, each=den_1$dim[1]), y=rep(den_1$yrow, den_1$dim[2]))
+    if(is.na(titre)){
+      ggplot(df) +
+        geom_tile(aes(x=x, y=y, fill=`RatioIntensité`)) +
+        scale_fill_gradientn(na.value="white", colours = rev(hex), name="Ratio d'int.", limits = c(0.5, 1.5), oob = scales::squish) + 
+        theme_void() + 
+        theme(
+          legend.margin = margin(10, 5, 0, 10))
+    # } else if (is.na(limits)){
+    #   ggplot(df) +
+    #   geom_tile(aes(x=x, y=y, fill=`RatioIntensité`)) +
+    #   scale_fill_gradientn(na.value="white", colours = rev(hex), name="Ratio d'int.") + 
+    #   theme_void() + 
+    #   theme(
+    #     legend.margin = margin(10, 5, 0, 10),  
+    #     plot.title = element_text(hjust = 0.5, face = "bold", size = 14)) +
+    #   labs(title = titre) 
+    } else {
+      ggplot(df) +
+      geom_tile(aes(x=x, y=y, fill=`RatioIntensité`)) +
+      scale_fill_gradientn(na.value="white", colours = rev(hex), name="Ratio d'int.", limits = c(0.5, 1.5), oob = scales::squish) + 
+      theme_void() + 
+      theme(
+        legend.margin = margin(10, 5, 0, 10),  
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14)) +
+      labs(title = titre) 
+      }
+    } else print("Pas la même bande passante")
+}
+
+den_M <- density(as.ppp(st_coordinates(mtl_M), mtlpoly_4))
+den_G <- density(as.ppp(st_coordinates(mtl_G), mtlpoly_4))
+den_L <- density(as.ppp(st_coordinates(mtl_L), mtlpoly_4))
+
+den_M_pre <- density(as.ppp(st_coordinates(mtl_M_pre), mtlpoly_4))
+den_G_pre <- density(as.ppp(st_coordinates(mtl_G_pre), mtlpoly_4))
+den_L_pre <- density(as.ppp(st_coordinates(mtl_L_pre), mtlpoly_4))
+
+den_M_post <- density(as.ppp(st_coordinates(mtl_M_post), mtlpoly_4))
+den_G_post <- density(as.ppp(st_coordinates(mtl_G_post), mtlpoly_4))
+den_L_post <- density(as.ppp(st_coordinates(mtl_L_post), mtlpoly_4))
+
+attr(den_M, "sigma")
+attr(den_G, "sigma")
+attr(den_M, "sigma")
+
+
+pM <- plot_den(den_M)
+pG <- plot_den(den_G)
+pL <- plot_den(den_L)
+
+pM_pre <- plot_den(den_M_pre) + geom_point(data=data.frame(st_coordinates(mtl_M_pre)), aes(x=X, y=Y), colour="black", size=0.1)
+pM_post <- plot_den(den_M_post) + geom_point(data=data.frame(st_coordinates(mtl_M_post)), aes(x=X, y=Y), colour="black", size=0.1)
+
+pG_pre <- plot_den(den_G_pre)
+pG_post <- plot_den(den_G_post)
+
+pL_pre <- plot_den(den_L_pre)
+pL_post <- plot_den(den_L_post)
+
+# pM + geom_point(data=data.frame(st_coordinates(mtl_M)), aes(x=X, y=Y), colour="black", size=0.1)
+# pG + geom_point(data=data.frame(st_coordinates(mtl_G)), aes(x=X, y=Y), colour="black", size=0.1)
+# pL + geom_point(data=data.frame(st_coordinates(mtl_L)), aes(x=X, y=Y), colour="black", size=0.1)
+
+
+pMsurG <- ratio_1Sur2(mtl_M, mtl_G, "Intensité accidents mortels / \nIntensité accidents graves")
+pMsurL <- ratio_1Sur2(mtl_M, mtl_L, "Intensité accidents mortels / \nIntensité accidents légers")
+pGsurL <- ratio_1Sur2(mtl_G, mtl_L, "Intensité accidents graves / \nIntensité accidents légers")
+
+p_MpostSurMpre <- ratio_1Sur2(mtl_M_post, mtl_G_pre, NA)#"Intensité accidents mortels post-Covid19 / \npre-Covid19")
+p_GpostSurGpre <- ratio_1Sur2(mtl_G_post, mtl_G_pre, NA)#"Intensité accidents graves post-Covid19 / \npre-Covid19")
+p_LpostSurLpre <- ratio_1Sur2(mtl_L_post, mtl_G_pre, NA)# "Intensité accidents légers post-Covid19 / \npre-Covid19")
+
+
+arrangeP <- ggarrange(pM, pM_pre, pM_post, p_MpostSurMpre, pG, pG_pre, pG_post, p_GpostSurGpre, pL, pL_pre, pL_post, p_LpostSurLpre)
+r1 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="Mortel", angle = 90, fontface = "bold") + theme_void() 
+r2 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="Grave", angle = 90, fontface = "bold") + theme_void() 
+r3 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="Léger", angle = 90, fontface = "bold") + theme_void() 
+c1 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="2012-2021", fontface = "bold") + theme_void() 
+c2 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="Pré-COVID19", fontface = "bold") + theme_void() 
+c3 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="COVID19", fontface = "bold") + theme_void() 
+c4 <- ggplot() + annotate(geom = 'text', x=1, y=1, label="Ratio COVID/Pré", fontface = "bold") + theme_void() 
+
+# layoutplot <- "
+# #eeffgghh
+# baaaaaaaa
+# baaaaaaaa
+# baaaaaaaa
+# caaaaaaaa
+# caaaaaaaa
+# caaaaaaaa
+# daaaaaaaa
+# daaaaaaaa
+# daaaaaaaa
+# "
+
+layoutplot <- "#efgh
+               baaaa
+               caaaa
+               daaaa
+              "
+
+plotlist <- list(a=arrangeP, b=r1, c=r2, d=r3, e=c1, f=c2, g=c3, h=c4)
+
+# fig: spp_mtl den ####
+wrap_plots(plotlist, guides = 'collect', design = layoutplot, widths = c(1,10,10,10,10), heights = c(1, 20,20,20))
+
+ggarrange(pMsurG, pMsurL, pGsurL, nrow=1, common.legend = T, legend = "right")
+ggarrange(p_MpostSurMpre, p_GpostSurGpre, p_LpostSurLpre, nrow=1, common.legend = T, legend = "right")
+
+# Même temporalité
+
+# mtl_M %>% filter(ind_covid==1) 
+# mtl_M %>% filter(ind_covid==2) 
+
+den_M_pre_mT <- density(as.ppp(st_coordinates(mtl_M %>% filter(ind_covid==1)), mtlpoly_4))
+den_M_post_mT <- density(as.ppp(st_coordinates(mtl_M %>% filter(ind_covid==2)), mtlpoly_4))
+den_G_pre_mT <- density(as.ppp(st_coordinates(mtl_G %>% filter(ind_covid==1)), mtlpoly_4))
+den_G_post_mT <- density(as.ppp(st_coordinates(mtl_G %>% filter(ind_covid==2)), mtlpoly_4))
+
+p_den_pre_mT <- plot_den(den_M_pre_mT) +
+  geom_point(data=data.frame(st_coordinates(mtl_M %>% filter(ind_covid==1))), aes(x=X, y=Y), colour="black", size=0.1) + 
+  ggtitle("Intensité des accidents mortels du \n13 mars 2018 au 31 décembre 2019") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+
+p_den_post_mT <- plot_den(den_M_post_mT) +
+  geom_point(data=data.frame(st_coordinates(mtl_M %>% filter(ind_covid==2))), aes(x=X, y=Y), colour="black", size=0.1) + 
+  ggtitle("Intensité des accidents mortels du \n13 mars 2020 au 31 décembre 2021") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+
+plot_den(den_G_pre_mT)
+plot_den(den_G_post_mT)
+
+p_GpostSurMpre_mT <- ratio_1Sur2(mtl_G %>% filter(ind_covid==2), mtl_G %>% filter(ind_covid==1), NA)
+p_MpostSurMpre_mT <- ratio_1Sur2(mtl_M %>% filter(ind_covid==2), mtl_M %>% filter(ind_covid==1), "Ratio d'intensité COVID/Pré \nsur la même temporalité")
+
+
+
+p_MpostSurMpre_mT_aj <- p_MpostSurMpre_mT + scale_fill_gradientn(na.value="white", colours = rev(hex), name="Ratio d'int.", limits = c(0,3), oob = scales::squish)
+
+# fig: density mT
+ggarrange(p_den_pre_mT, p_den_post_mT, p_MpostSurMpre_mT_aj, nrow=1)
+
+```
+
+## Méthode de la fonction K de Ripley
+```{r}
+ppp_M <- as.ppp(st_coordinates(mtl_M), mtlpoly_4)
+ppp_G <- as.ppp(st_coordinates(mtl_G), mtlpoly_4)
+ppp_L <- as.ppp(st_coordinates(mtl_L), mtlpoly_4)
+ppp_M_pre <- as.ppp(st_coordinates(mtl_M_pre), mtlpoly_4)
+ppp_G_pre <- as.ppp(st_coordinates(mtl_G_pre), mtlpoly_4)
+ppp_L_pre <- as.ppp(st_coordinates(mtl_L_pre), mtlpoly_4)
+ppp_M_post <- as.ppp(st_coordinates(mtl_M_post), mtlpoly_4)
+ppp_G_post <- as.ppp(st_coordinates(mtl_G_post), mtlpoly_4)
+ppp_L_post <- as.ppp(st_coordinates(mtl_L_post), mtlpoly_4)
+
+
+K_M <- Kest(ppp_M, correction = "Ripley")
+K_G <- Kest(ppp_G, correction = "Ripley")
+K_L <- Kest(ppp_L, correction = "Ripley")
+par(mfrow=c(1,3))
+plot(K_M, main="Régulier")
+plot(K_G, main="Poisson homogène")
+plot(K_L, main="Poisson non-homogène")
+
+
+M <- 100
+
+E_M <- envelope(ppp_M, Lest, nsim = M)
+E_G <- envelope(ppp_G, Lest, nsim = M)
+E_L <- envelope(ppp_L, Lest, nsim = 10)
+
+# fig: L mtl SPP
+plot(E_M, main="Accidents mortels")
+plot(E_G, main="Accidents graves")
+plot(E_L, main="Accidents légers")
+```
+
+
+
+
+
+
+
+
+
+
+# Figures CT et DA de mtl
+```{r}
+library(leafsync)
+
+# fig: spp_cc_CTvDA ####
+sync(mapview(mtl_cc_cov_CT, layer.name = "Secteurs de recensement"), mapview(mtl_cc_cov_DA, layer.name = "Aires de diffusion"))
+```
+
+
+# Construisons les jdD
+
+```{r}
+pts <- rbind(st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM) %>% select(geometry), mtl_M %>% select(geometry))
+intersects <- st_intersects(st_buffer(pts, 0.325), mtl_poly)
+ptAEnlever <- which(as.matrix(intersects)==F, as.matrix(intersects))
+mapview(pts[ptAEnlever,]) + mapview(mtl_poly)
+st_intersects(st_buffer(pts[ptAEnlever,], 0.325), mtl_poly)
+
+  # mapview(st_as_sf(data.frame(mtlIle_mesh_2$loc[,1:2]), coords = c("X1","X2"), crs=projUTM), cex=2) + mapview(mtl_M, col.regions="red", cex=2)
+
+pts <- pts[-ptAEnlever,]
+
+sf_spp <- st_sf(cbind(df_spp, pts))
+  # test <- eval_spatial(sf_spp, pts[16,], "link")
+
+# Derniers ajustements
+sf_spp <- sf_spp %>% 
+  mutate(fCStop_pond = fC+0.5*stop) %>%
+  mutate(hopit_times10 = hopit*10) %>%
+  mutate(pourcRes = propRes*100) %>% 
+  mutate(pourcIndComm = propIndComm*100) 
+
+```
+
+# Création triangulation plus fine
+```{r}
+# Sépare les 4 îles en différents polygones
+mtlpoly_4 <- st_cast(mtl_poly, "POLYGON")[2:4,]
+mtlIle_mesh <- inla.mesh.2d(boundary = mtlpoly_4, max.edge = 1, cutoff = 0.5, crs=projUTM)  
+plot(mtlIle_mesh)
+```
+
+# Fonctions utiles
+```{r}
+# Fonction qui évalue la valeur de la covariable à un pt spatial de l'île de Mtl
+fillGrid <- function(data, where, layer) {
+  v <- eval_spatial(data, where, layer)
+  # Fill in missing values; this example would work for SpatialPixelsDataFrame data
+  if (any(is.na(v))) {
+    v <- bru_fill_missing(data, where, v, layer)
+  }
+  return(v)
+}
+
+# Fonction qui affiche les covariables
+grid_gg <- function(data, layer, limits=NULL, title){
+  g <-ggplot() +
+        gg(cbind(data, layer), aes(fill=layer), geom = "tile") +
+        scale_fill_viridis_c(option="magma", limits=limits, , oob = scales::squish) +
+        ggtitle(title) +
+        labs(
+          x = "Longitude",               
+          y = "Latitude"                 
+        ) +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  return(g)
+}
+
+# test.fC <- fillGrid(sf_spp, pts, "stop")
+# table(test.fC == sf_spp$stop)
+
+coefs_signif <- function(mod){
+  temp <- mod$summary.fixed
+  temp$rownames <- row.names(temp)
+  family <- mod[["all.hyper"]][["family"]][[1]][["label"]]
+  type <- mod$model.random
+  coefs_signif <- data.frame(list(temp[(temp$`0.025quant` < 0 & temp$`0.975quant` < 0) | (temp$`0.025quant` > 0 & temp$`0.975quant` > 0),] %>% select(rownames, mean, `0.025quant`, `0.975quant`)))
+  return(coefs_signif)
+}
+
+mod_tableauPropre <- function(mods){
+  len <- length(mods)
+  coefs <- NULL
+  dic <- NULL
+  for (i in 1:len){
+    temp <- mods[[i]]$summary.fixed
+    coefs <- c(coefs, row.names(temp))
+    dic <- c(dic, round(mods[[i]]$dic$dic,3))
+  }
+  
+  df <- tibble(coefs=unique(coefs))
+  # nrow <- length(coefs)
+  # df <- as.data.frame(matrix(NA, nrow = nrow, ncol = len))
+  # rownames(df) <- coefs
+  for (i in 1:len){
+    temp <- mods[[i]]$summary.fixed
+    temp$mean <- (round(temp$mean,3))
+    temp$mean <- ifelse(
+          (temp[,3] < 0 & temp[,5] < 0) | (temp[,3] > 0 & temp[,5] > 0),
+          paste0(temp$mean, " *"),
+          paste0(temp$mean)
+        )
+    temp$coefs <- row.names(temp)
+    df <- left_join(df, temp[,c(1,8)], by=join_by(coefs==coefs))
+  }
+  compteur=1
+  Modèle <- "Modèle"
+  Gravité <- "Gravité"
+  Période <- "Période"
+  Région <- "Région"
+  NAs <- rep(NA, length(names(mods))+1)
+  for (i in names(mods)){
+    Région <- c(Région, "Montréal")
+    Modèle <- c(Modèle, "LGCP")
+    Période <- c(Période, ifelse(grepl("_14",i), "2014-21", ifelse(grepl("_11", i), "2011-21", ifelse(grepl("_post", i), "2020-21", ifelse(grepl("_pre", i), "2018-19", "2011-21")))))
+    Gravité <- c(Gravité, ifelse(grepl("_M", i), "Mortel", ifelse(grepl("_GM", i), "Grave + Mortel", ifelse(grepl("_L", i), "Léger", ifelse(grepl("_G", i), "Grave", "")))))
+    
+    compteur=compteur+1
+  }
+  # Famille <- gsub("poisson", "Poisson", Famille)
+  # Famille <- gsub("nbinomial", "NB", Famille)
+  # Famille <- gsub("zeroinflatedPoisson1", "ZIP", Famille)
+  
+  df_titre <- t(data.frame(Modèle, Région, Gravité, Période, NAs))
+  rownames(df_titre) <- NULL
+  df_titre <- df_titre[apply(df_titre, 1, function(row) any(row[-1] != "")), ]
+  colnames(df)[-1] <- paste("Modèle", 1:len)
+  colnames(df)[1] <- "Coefficients"
+  colnames(df_titre) <- colnames(df)
+  df[dim(df)[1]+1,] <- rep(NA, dim(df)[2])
+  df[dim(df)[1]+1,] <- t(data.frame(c("DIC", round(dic))))
+  df <- rbind(df_titre,df)
+  class(df_titre)
+
+  return(df)
+}
+```
+
+# Figures covariables OSM
+```{r}
+library(stargazer)
+# tab: osm_spp_resume ####
+tab_resume_spp <- sf_spp %>%
+  data.frame() %>%
+  select("Nb. feu circul. + 0.5 * Nb. panneaux d'arrêt dans un rayon de 325m"=fCStop_pond, 
+         "Nb. hôpitaux * 10 dans un rayon de 325m"=hopit_times10, ) %>% 
+  stargazer(., type="latex", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+```
+
+
+### Création grid
+```{r}
+bbox <- st_bbox(mtl_poly) # Assuming 'crashes' is your crash locations sf object
+
+# Define the grid cell size (e.g., 100 meters)
+cell_size <- 0.2
+
+# Create a grid
+x_coords <- seq(bbox["xmin"], bbox["xmax"], by = cell_size)
+y_coords <- seq(bbox["ymin"], bbox["ymax"], by = cell_size)
+grid <- expand.grid(x = x_coords, y = y_coords)
+
+# Convert to sf points
+grid_sf <- st_as_sf(grid, coords = c("x", "y"), crs = projUTM)
+gridMtl <- st_intersection(grid_sf, mtl_poly)
+# mapview(gridMtl, cex=1)
+
+st_crs(mtl_cc_cov_DA) == st_crs(projUTM)
+```
+
+## Remplir grid et visionner les covariables
+### OSM et CMM
+```{r}
+fC_grid <- fillGrid(sf_spp, st_geometry(gridMtl), "fC")
+stop_grid <- fillGrid(sf_spp, st_geometry(gridMtl), "stop")
+link_grid <- fillGrid(sf_spp, gridMtl, "link")
+hopit_grid <- fillGrid(sf_spp, gridMtl, "hopit")
+r_grid <- fillGrid(sf_spp, gridMtl, "rEns")
+r1_grid <- fillGrid(sf_spp, gridMtl, "r1")
+r2_grid <- fillGrid(sf_spp, gridMtl, "r2")
+r3_grid <- fillGrid(sf_spp, gridMtl, "r3")
+res_grid <- fillGrid(sf_spp, gridMtl, "propRes")
+indComm_grid <- fillGrid(sf_spp, gridMtl, "propIndComm")
+
+cor(fC_grid, stop_grid)
+cor(fC_grid, link_grid)
+cor(stop_grid, link_grid)
+cor(res_grid, indComm_grid)
+
+grid_gg(gridMtl, fC_grid, c(0,100), "Feux de circulation")
+grid_gg(gridMtl, stop_grid, title="stop")
+grid_gg(gridMtl, link_grid, title="link")
+grid_gg(gridMtl, hopit_grid, title="hopit")
+grid_gg(gridMtl, r_grid, title="somme routes")
+grid_gg(gridMtl, r1_grid, title="route1")
+grid_gg(gridMtl, r2_grid, title="route2")
+grid_gg(gridMtl, r3_grid, title="route3")
+grid_gg(gridMtl, res_grid, title="residentiel")
+grid_gg(gridMtl, indComm_grid, title="Indutriel&Commercial")
+```
+### Cancensus
+```{r}
+#######
+# Ajustements covariables de CC
+mtl_data_cc <- mtl_cc_cov_CT %>%
+  mutate(C19_benefits_divPopuTimes100 = ifelse(C19_bnf==0,0,C19_bnf/Popultn*100)) %>%
+  mutate(revenu_median_menage_div1000 = rvn_md_/1000) %>%
+  mutate(chomeurs_divPopuTimes100 = ifelse(chomers==0,0,chomers/Popultn*100),
+         jeunes_divPopuTimes100 = ifelse(Popultn==0,0,(a15_19+a20_24)/Popultn*100),
+         femmes_divPopuTimes100 = ifelse(Popultn==0,0,(femmes)/Popultn*100),
+         vieux_divPopuTimes100 = ifelse(Popultn==0,0,(a65_pls)/Popultn*100)) %>%
+  mutate(popu_density_div100 = pp_dnst/100)
+
+C19_benefits_divPopuTimes100 <- fillGrid(mtl_data_cc, st_geometry(gridMtl), "C19_benefits_divPopuTimes100")
+revenu_median_menage_div1000 <- fillGrid(mtl_data_cc, st_geometry(gridMtl), "revenu_median_menage_div1000")
+chomeurs_divPopuTimes100 <- fillGrid(mtl_data_cc, st_geometry(gridMtl), "chomeurs_divPopuTimes100")
+popu_density_div100 <- fillGrid(mtl_data_cc, st_geometry(gridMtl), "popu_density_div100")
+
+# mapview(mtl_data_cc %>% select(revenu_median_menage_div1000))
+grid_gg(gridMtl, C19_benefits_divPopuTimes100, title="C19_benefits (/100)")
+# grid_gg(gridMtl, C19_benef_grid, title="C19_benefits (/100)")
+grid_gg(gridMtl, revenu_median_menage_div1000, title="Revenu median par menage (/1000)")
+grid_gg(gridMtl, chomeurs_divPopuTimes100, title="chomeurs/popu*100")
+grid_gg(gridMtl, popu_density_div100, title="Densité de population/100")
+```
+
+# Corrélation
+```{r}
+sf_spp <- cbind(sf_spp, 
+      C19_benefits_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "C19_benefits_divPopuTimes100"),
+      revenu_median_menage_div1000=fillGrid(mtl_data_cc, st_geometry(sf_spp), "revenu_median_menage_div1000"),
+      chomeurs_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "chomeurs_divPopuTimes100"),
+      jeunes_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "jeunes_divPopuTimes100"),
+      vieux_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "vieux_divPopuTimes100"),
+      popu_density_div100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "popu_density_div100"))
+
+cor_spp <- sf_spp %>% data.frame %>%
+  select(fCStop_pond,
+         hopit_times10,
+         pourcRes,
+         pourcIndComm,
+         rEns,
+         C19_benefits_divPopuTimes100,
+         revenu_median_menage_div1000,
+         chomeurs_divPopuTimes100,
+         popu_density_div100,
+         jeunes_divPopuTimes100,
+         vieux_divPopuTimes100
+         ) 
+table(cor_spp$C19_benefits_divPopuTimes100)
+cor_matrix <- cor(cor_spp)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(abs(cor_upper) > (0.7), arr.ind = TRUE)
+result_mtl <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+stargazer(result_mtl, type="text", summary=F)
+```
+
+
+# Figures covariables CC et CMM
+
+```{r}
+# tab: cc_spp_resume ####
+mtl_data_cc %>%
+  data.frame() %>%
+  select("Revenu médian par ménage / 1000 dans le SR"= revenu_median_menage_div1000, 
+         "% de chômeurs dans le SR"= chomeurs_divPopuTimes100,
+         "% de jeunes (15 à 24 ans) dans le SR"= jeunes_divPopuTimes100,
+         "% de vieux (65 ans et plus) dans le SR"= vieux_divPopuTimes100,
+         "Centaines d'habitants par kilomètre carré dans le SR"= popu_density_div100,
+         "% de bénéficiaires de prestations de COVID-19 dans le SR"= C19_benefits_divPopuTimes100,
+         ) %>% 
+  stargazer(., type="latex", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+
+# tab: cmm_spp_resume ####
+sf_spp %>%
+  data.frame() %>%
+  select("% de zone résidentielle dans un rayon de 325 mètres"= pourcRes, 
+         "% de zones indus., comm., et bureau dans un rayon de 325 mètres"= pourcIndComm,
+         "Kilomètres de routes dans un rayon de 325 mètres"= rEns) %>% 
+  stargazer(., type="text", digit.separator="", digits=1, digits.extra = 2, header=F, out.header=F)
+
+
+```
+
+
+
+
+
+
+
+
+

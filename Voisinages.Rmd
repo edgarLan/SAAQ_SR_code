@@ -1,0 +1,377 @@
+---
+title: "Areal_jdD"
+author: "Edgar Lanoue"
+date: "2024-05-16"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+
+library(spdep)
+```
+
+
+# Importation de tous les jdD
+
+```{r}
+# Données accidents
+load(file.path(pathTraitees, "data_acc.Rda"))
+
+# Shapefiles Cancensus
+load(file.path(pathTraitees, "qc_muncp_cc.Rda"))
+load(file.path(pathTraitees, "qc_mrc_cc.Rda"))
+
+# Shapefiles - pas utile
+# load("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/jdDPropre/qc_muncp.Rda")
+# load("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Données/jdDPropre/qc_mrc.Rda")
+```
+Les covariables de Cancensus contiennent les shapefiles des municipalités et MRC. Ces shapefiles diffèrent un peu de la version officielles administratives des shapefiles. Nous utiliserons ceux de CC puisque les frontières géographiques y sont mieux représentées et nous obtenons les données de CC directement avec ces frontières. Toutes les autres jdD ont été ajustés en fct des shapefiles de CC.
+
+```{r}
+# mapview(qc_muncp_cc)
+# mapview(qc_mrc_cc)
+```
+
+# Création voisinage
+
+## Relier
+
+```{r}
+# Routes québec
+qc_route <- st_read(file.path(pathBrutes, "Débit Qc", "cir_v_geo_sectn_trafc_locls", "cir_v_geo_sectn_trafc_locls.shp"))
+qc_route <- st_transform(qc_route, crs)
+
+# Régions administratives
+qc_reg<- read_sf(dsn =file.path(pathBrutes, "Frontières administratives", "Quebec"), layer = "regio_s")
+qc_reg <- qc_reg[-1,]
+
+# Surfaces non inclus dans la shapefile CC
+qc_sf <- st_sf(st_union(qc_reg))
+qc_cc_sf <- st_sf(st_union(qc_mrc_cc))
+dif <- st_difference(qc_sf, qc_cc_sf)
+mapview(dif)
+
+# # Paramètres
+# regions_df <- qc_mrc_cc
+# CD <- "CD_MRC"
+# qc_route <- qc_route
+buff <- 100
+
+# Fonction qui retoure l'id de routes qui traversent des sections de dif, il s'agit souvent des ponts traversant des cours d'eau.
+id_route <- function(regions_df, qc_route, dif, buff){
+  route <- as.matrix(t(st_intersects(dif, qc_route))) # routes qui intersectent dif
+  idx_route <- which(rowSums(route) > 0L) # extraire id
+  route_tra <- !as.matrix((st_within(qc_route[idx_route,], dif))) # route doivent aller d'une région à l'autre et pas rester dans dif
+  idx_route_tra <- which(rowSums(route_tra) > 0L)
+  id_route <- idx_route[idx_route_tra]
+  # Régions qui touche aux routes 
+  route_buf <- st_buffer(qc_route[id_route,]$geometry, dist=buff)
+  int <- st_intersects(regions_df, route_buf, sparse=T)
+  id_reg <- which(rowSums(as.matrix(int))>0L)
+  return (list(id_route=id_route, id_reg=id_reg))
+}
+
+id_muncp <- id_route(qc_muncp_cc, qc_route, dif, buff=100)
+id_mrc <- id_route(qc_mrc_cc, qc_route, dif, buff=100)
+
+# mapview(qc_muncp_cc[id_muncp$id_reg,]) + mapview(qc_route[id_muncp$id_route,], color ="red")
+# mapview(qc_mrc_cc[id_mrc$id_reg,]) + mapview(qc_route[id_mrc$id_route,], color ="red")
+
+
+# Une section de routes doit relier deux régions et pas plus
+## Nous avons extraits les routes qui traversent des sections non définis du shapefile
+## Les routes qui relient une région à elle-même ne sont pas intéressantes
+## Les routes qui relient 3 régions et plus sont problématiques puisque les liens qu'on veut faire entre les régions ne seront pas nécessairement les bons
+
+id_route_prob <- function(regions_df, qc_route, id_reg_route, buff){
+  id_routeASep <- NULL
+  id_route_1 <- NULL
+  reg_tr <- regions_df[id_reg_route$id_reg,]
+  for (i in id_reg_route$id_route){
+    route <- qc_route[i,]
+    regALier <- st_filter(reg_tr, st_buffer(route$geometry, dist=buff))
+    if (dim(regALier)[1]>2){
+      id_routeASep <- c(id_routeASep, i)
+    }
+    else if (dim(regALier)[1]<2){
+      id_route_1 <- c(id_route_1, i)
+    }
+    # print(i)
+  }
+  return(list(id_routeASep=id_routeASep, id_route_1=id_route_1))
+}
+
+id_prob_muncp <- id_route_prob(qc_muncp_cc, qc_route, id_muncp, buff=100)
+id_prob_mrc <- id_route_prob(qc_mrc_cc, qc_route, id_mrc, buff=100)
+
+# Retirer routes qui ne sont que dans une région 
+id_muncp$id_route <- id_muncp$id_route[-match(id_prob_muncp$id_route_1, id_muncp$id_route)]
+id_mrc$id_route <- id_mrc$id_route[-match(id_prob_mrc$id_route_1, id_mrc$id_route)]
+
+# Forcer des chemins à ne relier que 2 régions en séparant les chemins en plusieurs segments
+separerRoutes <- function(regions_df, qc_route, id_prob, id_reg_route, buff){
+  if (!is.null(id_prob$id_routeASep)){
+    # Initialiser un multilinestring pour nouvelles sections de routes
+    lineAjout <- qc_route[1,] %>% select(geometry)
+    lineAjout$geometry[1] <- NULL
+    reg_tr <- regions_df[id_reg_route$id_reg,]
+    table <- NULL
+    for (i in id_prob$id_routeASep){
+      route <- qc_route[i,]
+      regALier <- st_filter(reg_tr, st_buffer(route$geometry, dist=buff))
+      pt_cast <- st_cast(route, "POINT") # Extraire les points où les régions changent
+      debut <- pt_cast[1,] %>% select(geometry)
+      fin <- pt_cast[dim(pt_cast)[1],] %>% select(geometry)
+      inter <- st_intersection(route, st_boundary(regALier)) %>% select(geometry)
+      joint <- rbind(debut, st_cast(st_cast(inter, "MULTIPOINT"), "POINT", do_split=T), fin)
+      joint <- joint[!duplicated(joint),]
+      
+      # Création des nouveaux segments p/r à la distance au premier point
+      dist <- sort(as.numeric(st_distance(joint)[1,]), index.return=T)
+      joint_ord <- joint[dist$ix,]
+      
+      coords <- st_coordinates(joint_ord)
+      n <- dim(joint_ord)[1]
+      result <- as.numeric(mapply(c, 1:(n-1), 2:n))
+      for (i in seq(1,2*dim(coords)[1]-2, by=2)){
+        line_temp <- st_linestring(matrix(coords[result[i]:result[i+1],], ncol=2))
+        line_temp <- st_sf(geometry=st_sfc(line_temp), crs=crs)
+        line_temp <- st_cast(line_temp, "MULTILINESTRING")
+        # print(colSums(as.matrix(st_intersects(regALier, st_buffer(line_temp, buff)))) >1)
+        if (colSums(as.matrix(st_intersects(regALier, st_buffer(line_temp, buff)))) == 2){
+          lineAjout <- rbind(lineAjout, line_temp)
+          temp <- colSums(as.matrix(st_intersects(regALier, st_buffer(line_temp, buff))))
+          table <- c(table, temp)
+        }
+      }
+    }
+    lineAjout <- lineAjout[-1,] # Retirer la première rangée bidon (était juste là pour initialisation)
+  
+  # Retirer route qu'on vient d'ajuster et ajouter les routes ajustées
+    qc_route_new <- rbind(qc_route %>% select(geometry), lineAjout)
+    id_route <- id_reg_route$id_route[-match(id_prob$id_routeASep, id_reg_route$id_route)]
+    id_route <- c(id_reg_route$id_route, (dim(qc_route)[1]+1):dim(qc_route_new)[1])
+  } else{
+    qc_route_new <- qc_route
+    id_route <- id_reg_route$id_route
+  }
+  return(list(id_route=id_route, qc_route_new=qc_route_new, table=table))
+}
+
+muncp_new <- separerRoutes(qc_muncp_cc, qc_route, id_prob_muncp, id_muncp, buff=100)
+mrc_new <- separerRoutes(qc_mrc_cc, qc_route, id_prob_mrc, id_mrc, buff)
+
+# Définir les nouvelles routes et id_route
+qc_route_muncp <- muncp_new$qc_route_new
+qc_route_mrc <- mrc_new$qc_route_new
+
+id_muncp$id_route <- muncp_new$id_route
+id_mrc$id_route <- mrc_new$id_route
+
+# Boucle qui relie toutes les municipalités avec route
+
+chgmntShp <- function(regions_df, qc_route_new, id_reg_route, buff, CD){
+  reg_temp <- regions_df
+  reg_tr <- regions_df[id_reg_route$id_reg,]
+  nouvReg <- NULL
+  for (i in id_reg_route$id_route){
+    print(i)
+    route <- qc_route_new[i,]
+    regALier <- st_filter(reg_tr, st_buffer(route$geometry, dist=buff))
+    if (!st_intersects(regALier[1,], regALier[2,],sparse=F) & dim(regALier)[1]==2){
+      nouvReg <- st_cast(st_difference(st_union(regALier[1,]$geometry, st_buffer(route$geometry, dist=buff)), regALier[2,]), "MULTIPOLYGON")
+      regALier[1,]$geometry <- nouvReg
+      regALier <- st_difference(st_make_valid(regALier[1:2,]))
+      reg_temp[which(as.numeric(st_drop_geometry(regALier[1,][CD]))==(st_drop_geometry(reg_temp[CD])), reg_temp),]$geometry <- regALier[1,]$geometry
+      reg_tr[which(as.numeric(st_drop_geometry(regALier[1,][CD]))==st_drop_geometry(reg_tr[CD]), reg_tr),]$geometry <- regALier[1,]$geometry
+      
+      reg_temp[which(as.numeric(st_drop_geometry(regALier[2,][CD]))==(st_drop_geometry(reg_temp[CD])), reg_temp),]$geometry <- regALier[2,]$geometry
+      reg_tr[which(as.numeric(st_drop_geometry(regALier[2,][CD]))==st_drop_geometry(reg_tr[CD]), reg_tr),]$geometry <- regALier[2,]$geometry
+    }
+  }
+  return(reg_temp)
+}
+
+muncp_maj <- chgmntShp(qc_muncp_cc, qc_route_muncp, id_muncp, buff, "CD_MUN")
+mrc_maj <- chgmntShp(qc_mrc_cc, qc_route_mrc, id_mrc, buff, "CD_MRC")
+
+mapview(mrc_maj)
+
+save(muncp_maj, file = file.path(pathTraitees, "muncp_maj.Rda"))
+save(mrc_maj, file = file.path(pathTraitees, "mrc_maj.Rda"))
+```
+
+# Voisinage par municipalités
+## Sauvegarder voisinage
+```{r}
+nb_mun_maj <- poly2nb(muncp_maj, snap=0.01)
+save(nb_mun_maj, file = file.path(pathTraitees, "nb_mun.Rda"))
+```
+
+# Voisinage par MRC
+## Sauvegarder voisinage
+```{r}
+nb_mrc_maj <- poly2nb(mrc_maj, snap=0.01)
+save(nb_mrc_maj, file = file.path(pathTraitees, "nb_mrc.Rda"))
+```
+
+```{r}
+load(file = file.path(pathTraitees, "muncp_maj.Rda"))
+load(file = file.path(pathTraitees, "mrc_maj.Rda"))
+load(file = file.path(pathTraitees, "nb_mun.Rda"))
+load(file = file.path(pathTraitees, "nb_mrc.Rda"))
+```
+
+```{r}
+lw_mun_maj_b <- nb2listw(nb_mun_maj, style = "B", zero.policy = T) # all neighbor links = 1 
+muncp_maj |> st_geometry() |> st_centroid() -> coords_muncp_maj # coordonnées de centroïdes des municipalités
+nb_mun_maj_sf <- nb2lines(nb_mun_maj, coords=coords_muncp_maj, proj4string=crs, as_sf=T) # transformer objet nb en objet sf pour faciliter le plot
+nb_mun_disj_maj <- n.comp.nb(nb_mun_maj) # lier chaque noeud (région) à son sous-graphe
+table(nb_mun_disj_maj$comp.id) # Vérif
+nb_mun_disj_maj$comp.id <- as.factor(nb_mun_disj_maj$comp.id)
+coords_muncp_maj <- data.frame(coords_muncp_maj,  comp_id=nb_mun_disj_maj$comp.id) # ajouter colonne liant noeud au sous-graphe
+nb_mun_maj_sf_disj <- left_join(nb_mun_maj_sf, data.frame(nb_mun_disj_maj, idx=1:1282), by=join_by(i==idx)) # Lier arête au sous-graphe
+
+
+mapview(nb_mun_maj_sf_disj, zcol="comp.id") + mapview(st_sf(coords_muncp_maj), cex=1, zcol="comp_id")
+mapview(st_sf(coords_muncp_maj)[coords_muncp_maj$comp_id!=2,], cex=4, zcol="comp_id")
+mapview(muncp_maj)
+```
+
+
+```{r}
+lw_mrc_maj_b <- nb2listw(nb_mrc_maj, style = "B", zero.policy = T) # all neighbor links = 1 
+mrc_maj |> st_geometry() |> st_centroid() -> coords_mrc_maj # coordonnées de centroïdes des mrc
+nb_mrc_maj_sf <- nb2lines(nb_mrc_maj, coords=coords_mrc_maj, proj4string=crs, as_sf=T) # transformer objet nb en objet sf pour faciliter le plot
+nb_mrc_disj_maj <- n.comp.nb(nb_mrc_maj) # lier chaque noeud (région) à son sous-graphe
+table(nb_mrc_disj_maj$comp.id) # Vérif
+nb_mrc_disj_maj$comp.id <- as.factor(nb_mrc_disj_maj$comp.id)
+coords_mrc_maj <- data.frame(coords_mrc_maj,  comp_id=nb_mrc_disj_maj$comp.id) # ajouter colonne liant noeud au sous-graphe
+nb_mrc_maj_sf_disj <- left_join(nb_mrc_maj_sf, data.frame(nb_mrc_disj_maj, idx=1:98), by=join_by(i==idx)) # Lier arête au sous-graphe
+
+mapview(nb_mrc_maj_sf_disj, zcol="comp.id") + mapview(st_sf(coords_mrc_maj), cex=1, zcol="comp_id")
+mapview(st_sf(coords_mrc_maj)[coords_mrc_maj$comp_id!=2,], cex=4, zcol="comp_id")
+mapview(mrc_maj)
+```
+
+# Vérification sur exclusion probable des régions isolées (iles de la madeleine et certaines iles sur le fleuve)
+```{r}
+munExclus <- muncp_maj[coords_muncp_maj$comp_id!=2,]
+acc_mun <- data_acc %>% group_by(gravite, CD_MUNCP) %>%
+  distinct(NO_SEQ_COLL, .keep_all = T) %>%
+  summarise(nbAcc=length(DT_ACCDN))
+acc_mun[acc_mun$CD_MUNCP %in% munExclus$CD_MUN,]
+
+mrcExclus <- mrc_maj[coords_mrc_maj$comp_id!=2,]
+acc_mrc <- data_acc %>% group_by(gravite, MRC) %>%
+  distinct(NO_SEQ_COLL, .keep_all = T) %>%
+  summarise(nbAcc=length(DT_ACCDN))
+acc_mrc[acc_mrc$MRC %in% mrcExclus$CD_MRC,]
+
+# Vérif
+# sum(acc_mun[acc_mun$CD_MUNCP %in% muncp_maj$CD_MUN,]$nbAcc)
+# sum(acc_mrc[acc_mrc$MRC %in% mrc_maj$CD_MRC,]$nbAcc)
+# dim(data_acc %>% distinct(NO_SEQ_COLL, .keep_all = T))
+```
+
+# Exclure le Nord-du-Qc
+```{r}
+load(file = file.path(pathTraitees, "qc_muncp.Rda"))
+load(file = file.path(pathTraitees, "qc_mrc.Rda"))
+
+qc_muncp_NQC <- left_join(muncp_maj, st_drop_geometry(qc_muncp), join_by(CD_MUN == MUS_CO_GEO))
+qc_muncp_NQC <-  qc_muncp_NQC %>% filter(MUS_CO_REG != 10) %>%
+  filter(!CD_MUN %in% c(97914, 97912, 97806, 97808, 97040))
+mapview(qc_muncp_NQC)
+
+qc_mrc_NQC <- left_join(mrc_maj, st_drop_geometry(qc_mrc), join_by(CD_MRC == MRS_CO_MRC))
+qc_mrc_NQC <-  qc_mrc_NQC %>% filter(MRS_CO_REG != 10) 
+mapview(qc_mrc_NQC)
+
+save(qc_muncp_NQC, file = file.path(pathTraitees, "qc_muncp_NQC.Rda"))
+save(qc_mrc_NQC, file = file.path(pathTraitees, "qc_mrc_NQC.Rda"))
+```
+## Voisinage par municipalités
+### Sauvegarder voisinage
+```{r}
+nb_mun_maj_NQC <- poly2nb(qc_muncp_NQC, snap=0.01)
+save(nb_mun_maj_NQC, file = file.path(pathTraitees, "nb_mun_NQC.Rda"))
+```
+
+## Voisinage par MRC
+### Sauvegarder voisinage
+```{r}
+nb_mrc_maj_NQC <- poly2nb(qc_mrc_NQC, snap=0.01)
+save(nb_mrc_maj_NQC, file = file.path(pathTraitees, "nb_mrc_NQC.Rda"))
+```
+
+
+
+# Figures
+
+```{r}
+load(file = file.path(pathTraitees, "muncp_maj.Rda"))
+load(file = file.path(pathTraitees, "mrc_maj.Rda"))
+load(file = file.path(pathTraitees, "qc_muncp_cc.Rda"))
+load(file = file.path(pathTraitees, "qc_mrc_cc.Rda"))
+
+mapview(qc_muncp_cc)
+mapview(qc_mrc_cc)
+mapview(muncp_maj)
+mapview(mrc_maj)
+
+library(leafsync)
+sync(mapview(qc_mrc_cc, legend=F), mapview(mrc_maj, legend=F))
+
+st_boundary(nb_mrc_maj_sf_disj)
+
+sync(mapview(nb_mun_maj_sf_disj, zcol="comp.id", legend=F) + mapview(st_sf(coords_muncp_maj), cex=1, zcol="comp_id", legend=F), mapview(nb_mrc_maj_sf_disj, zcol="comp.id", legend=F) + mapview(st_sf(coords_mrc_maj), cex=1, zcol="comp_id", legend=F), no.initial.sync = F)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,277 @@
+---
+title: "Alignement régions"
+author: "Edgar Lanoue"
+date: "2024-05-15"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+packages à inclure
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+```
+
+# Importation Cancensus pour municipalités et MRC
+
+```{r}
+qc_muncp_cc <- read_sf(file.path(pathBrutesWeb, "cancensus", "qc_muncp_cc.shp"))
+qc_mrc_cc <- read_sf(file.path(pathBrutesWeb, "cancensus", "qc_mrc_cc.shp"))
+```
+
+# Alignement des données
+
+```{r}
+load(file = paste(pathBrutes, "/data_acc.Rda", sep=""))
+# dim(data_acc)
+#################### Ajustements données accidents ####################
+
+# data_acc[1886044,]
+data_acc$heure_accdn[startsWith(data_acc$heure_accdn, "Non p")] <- NA
+data_acc$DT_ACCDN <- dmy(data_acc$DT_ACCDN)
+data_acc$REG_ADM <-substr(data_acc$REG_ADM, nchar(data_acc$REG_ADM) - 2, nchar(data_acc$REG_ADM) - 1)
+data_acc$REG_ADM <- as.numeric(data_acc$REG_ADM)
+library(stringr)
+regexp <- "[[:digit:]]+"
+data_acc$MRC <- str_extract(data_acc$MRC, regexp)
+data_acc$MRC <- as.numeric(data_acc$MRC)
+
+data_acc <- data_acc %>%
+    # distinct(NO_SEQ_COLL, .keep_all = T) %>%
+    filter(gravite == "Léger" | gravite == "Mortel" | gravite == "Grave")
+dim(data_acc)
+
+#################### Municipalités ####################
+
+# Géo officielles
+qc_muncp <- read_sf(dsn = paste(pathBrutes, "/Frontières administratives/Quebec", sep=""), layer = "munic_s")
+qc_muncp$MUS_CO_GEO <- as.numeric(qc_muncp$MUS_CO_GEO)
+# mapview(qc_muncp[((qc_muncp$MUS_CO_GEO==98904 | qc_muncp$MUS_CO_GEO==98912) & qc_muncp$MUS_VA_SUP <= 20000),])
+qc_muncp <- qc_muncp[!((qc_muncp$MUS_CO_GEO==98904 | qc_muncp$MUS_CO_GEO==98912) & qc_muncp$MUS_VA_SUP <= 20000),]
+### Ajustement p/r à municipalités rapportées comme 2 dans accidents et 1 dans ce shapefile
+temp_MR <- rbind(qc_muncp[qc_muncp$MUS_CO_GEO==88012,], qc_muncp[qc_muncp$MUS_CO_GEO==88012,])
+# mapview(temp_MR)
+temp_MR[1,]$MUS_CO_GEO <- 88010
+temp_MR[1,]$MUS_NM_MUN <- "Rochebaucourt"
+temp_MR[2,]$MUS_CO_GEO <- 88015
+temp_MR[2,]$MUS_NM_MUN <- "La Morandière"
+#### Enlever rangée et rajouter nouvelles rangées
+qc_muncp <- qc_muncp[qc_muncp$MUS_CO_GEO!=88012,]
+qc_muncp <- rbind(qc_muncp, temp_MR)
+# Déjà séparé dans données de la SAAQ
+
+
+# Ajustements
+qc_muncp_cc$CD_MUN <- as.numeric(substr(qc_muncp_cc$GeoUID, 3, nchar(qc_muncp_cc$GeoUID)))
+qc_muncp <- qc_muncp[!str_detect(qc_muncp$MUS_NM_MUN, "aquatique"),] # aquatique
+qc_muncp_cc[qc_muncp_cc$CD_MUN==82010,]$CD_MUN <- 80087 # NDdlS
+qc_muncp_cc$CD_MRC <- as.numeric(substr(qc_muncp_cc$CD_UID, 3,4)) # New
+# data_acc[data_acc$CD_MUNCP %in%  12804,]$CD_MUNCP <- 12057 # Cacouna 12804 - règler en ne gardant pas les dommages
+
+
+off_notCC <- setdiff(qc_muncp$MUS_CO_GEO, qc_muncp_cc$CD_MUN)
+# mapview(qc_muncp)
+# mapview(qc_muncp[qc_muncp$MUS_CO_GEO %in% off_notCC,])
+qc_muncp[qc_muncp$MUS_CO_GEO %in% off_notCC,]$MUS_NM_MUN
+qc_muncp <- qc_muncp[!qc_muncp$MUS_CO_GEO %in% off_notCC,] # retirer le restant
+
+
+#################### MRC ####################
+
+# Géo officielles
+qc_mrc <- read_sf(dsn =paste(pathBrutes, "/Frontières administratives/Quebec", sep=""), layer = "mrc_s")
+qc_mrc$MRS_CO_MRC <- as.numeric(qc_mrc$MRS_CO_MRC)
+# mapview(qc_mrc)
+qc_mrc <- qc_mrc[!(qc_mrc$geometry==subset(qc_mrc, MRS_CO_MRC %in% names(which(table(MRS_CO_MRC) > 1)))[1:2,]$geometry[1] | 
+                    qc_mrc$geometry==subset(qc_mrc, MRS_CO_MRC %in% names(which(table(MRS_CO_MRC) > 1)))[1:2,]$geometry[2]), ]
+# mapview(qc_mrc)
+
+# Ajustements
+qc_mrc_cc$CD_MRC <- as.numeric(substr(qc_mrc_cc$GeoUID, 3,4))
+CD_MRC_tr <- as.numeric(substr(qc_mrc$MRS_CO_MRC ,0,2)) # extraire 2 premiers chiffres des MRC des données officielles 
+
+# MRC qui ne sont pas pareils
+idx <- setdiff(qc_mrc_cc$CD_MRC, qc_mrc$MRS_CO_MRC)   
+# Enlevons toutes les MRC qui causent problèmes
+qc_mrc_temp <- qc_mrc
+mapview(qc_mrc_temp)
+qc_mrc <- qc_mrc[!(CD_MRC_tr %in% idx),]
+
+i=37
+library(leafsync)
+# mapview(qc_mrc_temp[grepl(i,qc_mrc_temp$MRS_CO_MRC),])
+# mapview(qc_mrc_cc[grepl(i,qc_mrc_cc$CD_MRC),])
+sync(mapview(qc_mrc_temp[grepl(i,qc_mrc_temp$MRS_CO_MRC),], legend=F), mapview(qc_mrc_cc[grepl(i,qc_mrc_cc$CD_MRC),], legend=F))
+
+for (i in idx){
+  full_geo <- st_union(qc_mrc_temp[grepl(i,qc_mrc_temp$MRS_CO_MRC),])
+  temp <- qc_mrc_temp[grepl(i,qc_mrc_temp$MRS_CO_MRC),][1,]
+  temp$geometry <- full_geo
+  temp$MRS_CO_MRC <- i
+  qc_mrc <- rbind(qc_mrc, temp)
+  data_acc[grepl(i, data_acc$MRC),]$MRC <- i
+}
+# length(unique(data_acc$MRC))
+
+
+# Vérifications
+
+## Muncicipalités
+
+## Les données d'accidents et de géographie officielle concordent toujours
+# setdiff(data_acc$CD_MUNCP, qc_muncp$MUS_CO_GEO) 
+# setdiff(data_acc$CD_MUNCP, qc_muncp_cc$CD_MUN)
+# 
+# ## Les données de géo officielles et CC concordent
+# setdiff(qc_muncp$MUS_CO_GEO, qc_muncp_cc$CD_MUN)
+# setdiff(qc_muncp_cc$CD_MUN, qc_muncp$MUS_CO_GEO)
+# table(sort(qc_muncp_cc$CD_MUN)==sort(qc_muncp$MUS_CO_GEO))
+# 
+# ## MRC
+# ## Les données d'accidents et de géographie officielles concordent toujours
+# setdiff(data_acc$MRC, qc_mrc$MRS_CO_MRC)
+# setdiff(qc_mrc$MRS_CO_MRC, data_acc$MRC)
+# ## Les données de géo officielles et CC concordent
+# setdiff(qc_mrc_cc$CD_MRC, qc_mrc$MRS_CO_MRC) # Dans CC, mais pas dans données officielles
+# setdiff(qc_mrc$MRS_CO_MRC, qc_mrc_cc$CD_MRC) # Dans données officielles mais pas CC
+# table(sort(qc_mrc$MRS_CO_MRC)==sort(qc_mrc_cc$CD_MRC))
+# 
+# # Dimension
+# dim(data_acc) # mêmes dimensions qu'au début!
+# 
+# 
+# # muncp : CD_UID et mrc : GEO
+# table(qc_muncp_cc$CD_MRC %in% qc_mrc_cc$CD_MRC)
+
+# mapview(qc_muncp)
+# mapview(qc_mrc)
+```
+
+
+# Sauvegarder 
+```{r}
+save(data_acc, file = file.path(pathTraitees, "data_acc.Rda"))
+save(qc_muncp, file = file.path(pathTraitees, "qc_muncp.Rda"))
+save(qc_muncp_cc, file = file.path(pathTraitees, "qc_muncp_cc.Rda"))
+save(qc_mrc, file = file.path(pathTraitees, "qc_mrc.Rda"))
+save(qc_mrc_cc, file = file.path(pathTraitees, "qc_mrc_cc.Rda"))
+
+# # Verif
+# # Reprendre data_acc d'en haut
+# # data_acc_ini <- data_acc
+# load(file = paste(pathBrutes, "/data_acc.Rda", sep=""))
+# data_acc$heure_accdn[startsWith(data_acc$heure_accdn, "Non p")] <- NA
+# data_acc$DT_ACCDN <- dmy(data_acc$DT_ACCDN)
+# data_acc$REG_ADM <-substr(data_acc$REG_ADM, nchar(data_acc$REG_ADM) - 2, nchar(data_acc$REG_ADM) - 1)
+# data_acc$REG_ADM <- as.numeric(data_acc$REG_ADM)
+# library(stringr)
+# regexp <- "[[:digit:]]+"
+# data_acc$MRC <- str_extract(data_acc$MRC, regexp)
+# data_acc$MRC <- as.numeric(data_acc$MRC)
+# data_acc <- data_acc %>%
+#     # distinct(NO_SEQ_COLL, .keep_all = T) %>%
+#     filter(gravite == "Léger" | gravite == "Mortel" | gravite == "Grave")
+# data_acc_ini <- data_acc
+# load(file = paste(pathTraitees, "/data_acc.Rda", sep=""))
+# table(data_acc$MRC == data_acc_ini$MRC)
+# dim(data_acc)
+# dim(data_acc_ini)
+# table(!(data_acc$MRC %in% idx))
+# data_acc %>% filter(CD_MUNCP %in% off_notCC)
+```
+
+
+
+# Ajustements des jdD de Cancensus et frontières administratives officielles
+
+## Ajustements des muncp et mrc
+```{r}
+muncp_cc_cov <- read_sf(file.path(pathBrutesWeb, "cancensus", "muncp_cc_cov.shp"))
+muncp_cc_cov$CD_MUN <- as.numeric(substr(muncp_cc_cov$GeoUID, 3, nchar(muncp_cc_cov$GeoUID)))
+muncp_cc_cov[muncp_cc_cov$CD_MUN==82010,]$CD_MUN <- 80087 # NDdlS
+muncp_cc_cov$CD_MRC <- as.numeric(substr(muncp_cc_cov$CD_UID, 3,4))
+
+mrc_cc_cov <- read_sf(file.path(pathBrutesWeb, "cancensus", "mrc_cc_cov.shp"))
+mrc_cc_cov$CD_MRC <- as.numeric(substr(mrc_cc_cov$GeoUID, 3,4))
+```
+
+
+## NA a 0
+Fonction qui retourne le df en remplacant les NAs en 0 pour les variables de populations (tous les comptes) et de revenu médian
+```{r}
+remp_NA <- function(df, varAire){
+  inf <- which(names(df) == varAire)
+  sup <- which(names(df) == "geometry")
+  df_reste <- df[,-(inf:sup)]
+  df <- st_drop_geometry(df[,inf:sup]) %>% replace(is.na(.), 0)
+  df <- cbind(df_reste, df)
+  return(df)
+}
+```
+
+## Ajustements NA (pour SPP aussi)
+
+```{r}
+# pour les variables de population et de revenu médian
+muncp_cc_cov <- remp_NA(muncp_cc_cov, "Ar(skm)")
+mrc_cc_cov <- remp_NA(mrc_cc_cov, "Ar(skm)")
+muncp_cc_cov[is.na(muncp_cc_cov$Popultn),]$Popultn <- 0
+if (any(is.na(mrc_cc_cov$Popultn))) {
+  # Remplacer les NA par 0
+  mrc_cc_cov$Popultn[is.na(mrc_cc_cov$Popultn)] <- 0
+}
+
+qc_rAdm <- st_read(file.path(pathBrutes, "Frontières administratives", "Quebec", "regio_s.shp"))
+load(file.path(pathTraitees, "qc_muncp.Rda"))
+load(file.path(pathTraitees, "qc_mrc.Rda"))
+
+temp_muncp <- left_join(st_drop_geometry(muncp_cc_cov), st_drop_geometry(qc_muncp), by=join_by(CD_MUN==MUS_CO_GEO))
+muncp_cc_cov$CD_rAdm <- as.numeric(temp_muncp$MUS_CO_REG)
+temp_mrc <- left_join(st_drop_geometry(mrc_cc_cov), st_drop_geometry(qc_mrc), by=join_by(CD_MRC==MRS_CO_MRC))
+mrc_cc_cov$CD_rAdm <- as.numeric(temp_mrc$MRS_CO_REG)
+
+
+mtl_cc_cov_CT <- read_sf(file.path(pathBrutesWeb, "cancensus", "mtl_cc_cov_CT.shp"))
+mtl_cc_cov_DA <- read_sf(file.path(pathBrutesWeb, "cancensus", "mtl_cc_cov_DA.shp"))
+
+mtl_cc_cov_CT <- remp_NA(mtl_cc_cov_CT, "Ar(skm)")
+mtl_cc_cov_DA <- remp_NA(mtl_cc_cov_DA, "Ar(skm)")
+
+
+save(muncp_cc_cov, file = file.path(pathTraitees, "muncp_cc_cov.Rda"))
+save(mrc_cc_cov, file = file.path(pathTraitees, "mrc_cc_cov.Rda"))
+save(mtl_cc_cov_CT, file = file.path(pathTraitees, "mtl_cc_cov_CT.Rda"))
+save(mtl_cc_cov_DA, file = file.path(pathTraitees, "mtl_cc_cov_DA.Rda"))
+```
+
+
+
+

@@ -1,0 +1,236 @@
+---
+title: "Exportation OSM"
+author: "Edgar Lanoue"
+date: "2024-05-15"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre/"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+package à inclure
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+```
+
+# Importation Cancensus de la géographie de Montréal, et du Québec
+Nous utilisons les données géographiques des régions que nous prenons de Cancensus.
+```{r}
+qc_bb <- getbb("Quebec")
+mtl_bb <- getbb("Montreal")
+
+# Polygone de la province du Qc
+qc_poly <- getbb(place_name = "Quebec", format_out = "polygon", limit=1)
+
+# Le premier de la liste est effectivement la province, les autres sont des iles loin au Nord
+  qc_poly <- st_polygon(list(qc_poly[[1]]))
+  qc_poly <- st_sf(geometry = st_sfc(qc_poly), crs = crs)
+
+# Shp de l'ile de Mtl
+  # Mesh pour ile de Mtl
+mtl_poly <- get_census(dataset='CA21', regions=list(CMA="2466"),
+                         level='CD', quiet = TRUE,
+                         geo_format = 'sf', labels = 'short')
+mtl_poly <- st_transform(mtl_poly, crs = projUTM)
+st_write(mtl_poly, paste(pathBrutesWeb, "/cancensus/mtl_poly.shp", sep=""), append=FALSE)
+```
+
+
+# Proxy Intersections
+
+```{r}
+# Quebec feu de circulation
+tic()
+qc_fC <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "traffic_signals") %>%
+  osmdata_sf()
+qc_fC <- qc_fC$osm_points %>% select(osm_id, geometry)
+toc()
+# 154sec
+
+# Quebec panneau stop
+tic()
+qc_stop <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "stop") %>%
+  osmdata_sf()
+qc_stop <- qc_stop$osm_points %>% select(osm_id, geometry)
+toc()
+#126sec
+
+# Quebec routes liantes
+tic()
+qc_link <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key="highway", value = c("motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link")) %>%
+  osmdata_sf()
+qc_link <- qc_link$osm_lines %>% select(osm_id, highway, geometry)
+toc()
+  # Centroides des routes liantes
+  qc_link_ct <- st_centroid(qc_link)
+  mapview(qc_link_ct %>% filter(osm_id=="25152093")) + mapview(qc_link %>% filter(osm_id=="25152093"))
+#128sec
+  
+# Mettre en NAD 83
+qc_fC <- st_transform(qc_fC, crs)
+qc_stop <- st_transform(qc_stop, crs)
+qc_link_ct <- st_transform(qc_link_ct, crs)
+
+# Spécifiquement pour le Qc
+tic()
+qc_fC <- st_intersection(qc_fC, qc_poly)
+qc_stop <- st_intersection(qc_stop, qc_poly)
+qc_link_ct <- st_intersection(qc_link_ct, qc_poly)
+toc()
+
+# Spécifiquement pour Mtl
+tic()
+mtl_fC <- st_intersection(st_transform(qc_fC, projUTM), mtl_poly)
+mtl_stop <- st_intersection(st_transform(qc_stop, projUTM), mtl_poly)
+mtl_link_ct <- st_intersection(st_transform(qc_link_ct, projUTM), mtl_poly)
+toc()
+  # Ne garder que osm_id et geometry
+  mtl_fC <- mtl_fC %>% select(osm_id, geometry)
+  mtl_stop <- mtl_stop %>% select(osm_id, geometry)
+  mtl_link_ct <- mtl_link_ct %>% select(osm_id, geometry)
+
+# Carte
+# mapview(qc_fC)
+# mapview(qc_stop)
+# mapview(qc_link_ct)
+# mapview(mtl_fC)
+# mapview(mtl_stop)
+# mapview(mtl_link_ct)
+
+# sauvegarder les sf
+dir.create(file.path(pathBrutesWeb, "osm", "intersections"), recursive = TRUE, showWarnings = FALSE)
+
+# Write the shapefiles
+st_write(qc_fC, file.path(pathBrutesWeb, "osm", "intersections", "qc_fC.shp"), append=FALSE)
+st_write(qc_stop, file.path(pathBrutesWeb, "osm", "intersections", "qc_stop.shp"), append=FALSE)
+st_write(qc_link_ct, file.path(pathBrutesWeb, "osm", "intersections", "qc_link_ct.shp"), append=FALSE)
+
+st_write(mtl_fC, file.path(pathBrutesWeb, "osm", "intersections", "mtl_fC.shp"), append=FALSE)
+st_write(mtl_stop, file.path(pathBrutesWeb, "osm", "intersections", "mtl_stop.shp"), append=FALSE)
+st_write(mtl_link_ct, file.path(pathBrutesWeb, "osm", "intersections", "mtl_link_ct.shp"), append=FALSE)
+
+```
+
+
+# Routes
+```{r}
+tic()
+qc_ter <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "tertiary") %>%
+  osmdata_sf() 
+toc()
+qc_ter <- st_transform(qc_ter$osm_lines, crs)
+qc_ter <- qc_ter %>% select(osm_id, highway, geometry)
+# 1152 secondes
+
+tic()
+qc_sec <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "secondary") %>%
+  osmdata_sf() 
+toc()
+qc_sec <- st_transform(qc_sec$osm_lines, crs)
+qc_sec <- qc_sec %>% select(osm_id, highway, geometry)
+# 565 sec
+
+tic()
+qc_pr <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "primary") %>%
+  osmdata_sf() 
+toc()
+qc_pr <- st_transform(qc_pr$osm_lines, crs)
+qc_pr <- qc_pr %>% select(osm_id, highway, geometry)
+# 211 sec
+
+tic()
+qc_tr <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "trunk") %>%
+  osmdata_sf()
+toc()
+qc_tr <- st_transform(qc_tr$osm_lines, crs)
+qc_tr <- qc_tr %>% select(osm_id, highway, geometry)
+# 27 sec
+
+tic()
+qc_mw <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "highway", value = "motorway") %>%
+  osmdata_sf() 
+toc()
+# Ne garder que les lines!
+qc_mw <- st_transform(qc_mw$osm_lines, crs)
+qc_mw <- qc_mw %>% select(osm_id, highway, geometry)
+# 92 sec
+
+
+dir.create(file.path(pathBrutesWeb, "osm", "routes"), recursive = TRUE, showWarnings = FALSE)
+
+# Écriture des fichiers shapefile
+st_write(qc_ter, file.path(pathBrutesWeb, "osm", "routes", "qc_ter.shp"), append=FALSE)
+st_write(qc_sec, file.path(pathBrutesWeb, "osm", "routes", "qc_sec.shp"), append=FALSE)
+st_write(qc_pr, file.path(pathBrutesWeb, "osm", "routes", "qc_pr.shp"), append=FALSE)
+st_write(qc_tr, file.path(pathBrutesWeb, "osm", "routes", "qc_tr.shp"), append=FALSE)
+st_write(qc_mw, file.path(pathBrutesWeb, "osm", "routes", "qc_mw.shp"), append=FALSE)
+```
+
+# Hopitaux
+
+```{r}
+tic()
+qc_hosp <- qc_bb %>%
+  opq(timeout = 500) %>%
+  add_osm_feature(key = "amenity", value = "hospital") %>%
+  osmdata_sf()
+toc() # 12 sec
+
+hosp_poly <- qc_hosp$osm_polygons %>% select(osm_id, geometry)
+hosp_mPoly <- qc_hosp$osm_multipolygons %>% select(osm_id, geometry)
+
+qc_hosp_ct <- rbind(st_centroid(hosp_poly), st_centroid(st_make_valid(hosp_mPoly)))
+qc_hosp_ct <- st_transform(qc_hosp_ct, crs)
+
+# Créer le répertoire s'il n'existe pas
+dir.create(file.path(pathBrutesWeb, "osm", "autres"), recursive = TRUE, showWarnings = FALSE)
+
+# Écrire le fichier shapefile
+st_write(qc_hosp_ct, file.path(pathBrutesWeb, "osm", "autres", "qc_hosp.shp"), append=FALSE)
+
+```
+
+
+

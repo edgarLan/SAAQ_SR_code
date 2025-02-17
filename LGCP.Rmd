@@ -1,0 +1,2153 @@
+---
+title: "LGCP Modèles finaux"
+author: "Edgar Lanoue"
+date: "2024-09-10"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Figures
+fig: spp_mtl
+fig: carte pg
+fig: carte covPG
+fig: pts sur mtl 
+
+# Tableaux
+tab: coefs lgcp_cov_M
+tab: coefs lgcp_cov_G
+tab: compa_covPG
+tab: DIC prestaC19
+
+
+###########################
+
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+
+```{r}
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+library(spatstat)
+library(ggpubr)
+library(fields)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+library(patchwork)
+
+library(viridis)
+
+# ## Quick fix for stargazer <= 5.2.3 is.na() issue with long model names in R >= 4.2
+# # Unload stargazer if loaded
+# detach("package:stargazer",unload=T)
+# # Delete it
+# remove.packages("stargazer")
+# # Download the source
+# download.file("https://cran.r-project.org/src/contrib/stargazer_5.2.3.tar.gz", destfile = "stargazer_5.2.3.tar.gz")
+# # Unpack
+# untar("stargazer_5.2.3.tar.gz")
+# # Read the sourcefile with .inside.bracket fun
+# stargazer_src <- readLines("stargazer/R/stargazer-internal.R")
+# # Move the length check 5 lines up so it precedes is.na(.)
+# stargazer_src[1990] <- stargazer_src[1995]
+# stargazer_src[1995] <- ""
+# # Save back
+# writeLines(stargazer_src, con="stargazer/R/stargazer-internal.R")
+# # Compile and install the patched package
+# install.packages("stargazer", repos = NULL, type="source")
+library(stargazer)
+```
+
+```{r}
+hex <- c("darkred", "red", "orange", "yellow", "green", "cyan", "blue", "darkblue")
+```
+
+# Importation Cancensus pour municipalités et MRC
+```{r}
+qc_bb <- getbb("Quebec")
+mtl_bb <- getbb("Montreal")
+
+# Polygone de la province du Qc
+qc_poly <- getbb(place_name = "Quebec", format_out = "polygon", limit=1)
+
+# Le premier de la liste est effectivement la province, les autres sont des iles loin au Nord
+  qc_poly <- st_polygon(list(qc_poly[[1]]))
+  qc_poly <- st_sf(geometry = st_sfc(qc_poly), crs = crs)
+
+mtl_poly <- read_sf(file.path(pathBrutesWeb, "cancensus", "mtl_poly.shp")) #pas OSM, CC!!!!
+mtl_poly
+plot(mtl_poly)
+mtl_poly <- st_transform(mtl_poly, crs = projUTM)
+
+# Sépare les 4 îles en différents polygones
+mtlpoly_4 <- st_cast(mtl_poly, "POLYGON")
+mtlIle_mesh <- inla.mesh.2d(boundary = mtlpoly_4, max.edge = 2, cutoff = 1, crs=projUTM)  #2,1
+plot(mtlIle_mesh)
+
+```
+
+# Importons les données
+```{r}
+load(file.path(pathTraitees, "df_spp.Rda"))
+load(file.path(pathTraitees, "mtl_cc_cov_CT.Rda"))
+load(file.path(pathTraitees, "mtl_cc_cov_DA.Rda"))
+
+load(file.path(pathTraitees, "mtl_M.Rda"))
+load(file.path(pathTraitees, "mtl_G.Rda"))
+load(file.path(pathTraitees, "mtl_L.Rda"))
+
+diff_days <- as.numeric(date("2021-12-31") - date("2020-03-13"))
+date_ini <- date("2019-12-31") - diff_days 
+
+mtl_M <- mtl_M %>%
+  mutate(ind_covid=0) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN >= date_ini & DT_ACCDN <= date("2019-12-31"), 1, ind_covid)) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN >= date("2020-03-13"),2, ind_covid))
+
+mtl_G <- mtl_G %>%
+  mutate(ind_covid=0) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN >= date_ini & DT_ACCDN < date("2019-12-31"), 1, ind_covid)) %>%
+  mutate(ind_covid = ifelse(DT_ACCDN >= date("2020-03-13"),2, ind_covid))
+
+mtl_M %>% dim
+mtl_M %>% filter(ind_covid==0) %>% dim
+mtl_M %>% filter(ind_covid==1) %>% dim
+mtl_M %>% filter(ind_covid%in%c(0,1)) %>% dim
+mtl_M %>% filter(ind_covid==2) %>% dim
+
+mtl_G %>% dim
+mtl_G %>% filter(ind_covid==0) %>% dim
+mtl_G %>% filter(ind_covid==1) %>% dim
+mtl_G %>% filter(ind_covid==2) %>% dim
+
+
+mtl_M %>% filter(ind_covid==1) %>% dim()
+mtl_M %>% filter(ind_covid==2) %>% dim()
+
+mapview(mtl_M %>% filter(ind_covid==1), col.region="red", cex=2) + mapview(mtl_M %>% filter(ind_covid==2), col.region="blue", cex=2) 
+
+
+# Ind pre/post covid - 2020
+mtl_M_post <- mtl_M %>% filter(DT_ACCDN > date("2020-03-13")) 
+mtl_M_pre <- mtl_M %>% filter(DT_ACCDN <= date("2020-03-13")) 
+mtl_G_post <- mtl_G %>% filter(DT_ACCDN > date("2020-03-13")) 
+mtl_G_pre <- mtl_G %>% filter(DT_ACCDN <= date("2020-03-13")) 
+mtl_L_post <- mtl_L %>% filter(DT_ACCDN > date("2020-03-13")) 
+mtl_L_pre <- mtl_L %>% filter(DT_ACCDN <= date("2020-03-13")) 
+
+
+# fig: spp_mtl ####
+mapview(mtl_M, cex=3)
+
+
+# length(mtl_L$NO_SEQ_COL)
+# length(unique(mtl_L$NO_SEQ_COL))
+
+mtl_M %>% group_by(AN) %>%
+  summarise(nbAcc=length(NO_SEQ_COL)) %>%
+  st_drop_geometry() %>% plot()
+```
+
+
+# Construisons les jdD
+
+```{r}
+pts <- rbind(st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM) %>% select(geometry), mtl_M %>% select(geometry))
+intersects <- st_intersects(st_buffer(pts, 0.325), mtl_poly)
+ptAEnlever <- which(as.matrix(intersects)==F, as.matrix(intersects))
+mapview(pts[ptAEnlever,]) + mapview(mtl_poly)
+st_intersects(st_buffer(pts[ptAEnlever,], 0.325), mtl_poly)
+
+# fig: pts sur mtl ####
+mapview(st_as_sf(data.frame(mtlIle_mesh$loc[,1:2]), coords = c("X1","X2"), crs=projUTM), cex=2, layer.name="384 points réparties uniformément") + mapview(mtl_M, col.regions="red", cex=2, layer.name="263 accidents mortels à Montréal entre 2012 et 2021")
+
+pts <- pts[-ptAEnlever,]
+
+sf_spp <- st_sf(cbind(df_spp, pts))
+  # test <- eval_spatial(sf_spp, pts[16,], "link")
+
+# Derniers ajustements
+sf_spp <- sf_spp %>% 
+  mutate(fCStop_pond = fC+0.5*stop) %>%
+  mutate(hopit_times10 = hopit*10) %>%
+  mutate(pourcRes = propRes*100) %>% 
+  mutate(pourcIndComm = propIndComm*100) 
+
+```
+
+
+```{r}
+bbox <- st_bbox(mtl_poly) # Assuming 'crashes' is your crash locations sf object
+
+# Define the grid cell size (e.g., 100 meters)
+cell_size <- 0.2
+
+# Create a grid
+x_coords <- seq(bbox["xmin"], bbox["xmax"], by = cell_size)
+y_coords <- seq(bbox["ymin"], bbox["ymax"], by = cell_size)
+grid <- expand.grid(x = x_coords, y = y_coords)
+
+# Convert to sf points
+grid_sf <- st_as_sf(grid, coords = c("x", "y"), crs = projUTM)
+gridMtl <- st_intersection(grid_sf, mtl_poly)
+# mapview(gridMtl, cex=1)
+# Fonction qui évalue la valeur de la covariable à un pt spatial de l'île de Mtl
+fillGrid <- function(data, where, layer) {
+  v <- eval_spatial(data, where, layer)
+  # Fill in missing values; this example would work for SpatialPixelsDataFrame data
+  if (any(is.na(v))) {
+    v <- bru_fill_missing(data, where, v, layer)
+  }
+  return(v)
+}
+# Fonction qui affiche les covariables
+grid_gg <- function(data, layer, limits=NULL, title){
+  g <-ggplot() +
+        gg(cbind(data, layer), aes(fill=layer), geom = "tile") +
+        scale_fill_viridis_c(option="magma", limits=limits, , oob = scales::squish) +
+        ggtitle(title) +
+        labs(
+          x = "Longitude",               
+          y = "Latitude"                 
+        ) +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  return(g)
+}
+
+
+
+fC_grid <- fillGrid(sf_spp, st_geometry(gridMtl), "fCStop_pond")
+hopit_grid <- fillGrid(sf_spp, gridMtl, "hopit")
+
+# fig: fC_mtl
+grid_gg(gridMtl, fC_grid, title="Feux de circulation + 1/2 Panneux d'arrêt")
+
+grid_gg(gridMtl, hopit_grid, title="hopit")
+
+```
+
+# Création triangulation plus fine
+```{r}
+# Sépare les 4 îles en différents polygones
+mtlpoly_4 <- st_cast(mtl_poly, "POLYGON")[2:4,]
+mtlIle_mesh <- inla.mesh.2d(boundary = mtlpoly_4, max.edge = 1, cutoff = 0.5, crs=projUTM)  
+plot(mtlIle_mesh)
+```
+
+# Fonctions utiles
+```{r}
+# Fonction qui évalue la valeur de la covariable à un pt spatial de l'île de Mtl
+fillGrid <- function(data, where, layer) {
+  v <- eval_spatial(data, where, layer)
+  # Fill in missing values; this example would work for SpatialPixelsDataFrame data
+  if (any(is.na(v))) {
+    v <- bru_fill_missing(data, where, v, layer)
+  }
+  return(v)
+}
+
+# Fonction qui affiche les covariables
+grid_gg <- function(data, layer, limits=NULL, title){
+  g <-ggplot() +
+        gg(cbind(data, layer), aes(fill=layer), geom = "tile") +
+        scale_fill_viridis_c(option="magma", limits=limits, , oob = scales::squish) +
+        ggtitle(title) +
+        labs(
+          x = "Longitude",               
+          y = "Latitude"                 
+        ) +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  return(g)
+}
+
+# test.fC <- fillGrid(sf_spp, pts, "stop")
+# table(test.fC == sf_spp$stop)
+
+coefs_signif <- function(mod){
+  temp <- mod$summary.fixed
+  temp$rownames <- row.names(temp)
+  family <- mod[["all.hyper"]][["family"]][[1]][["label"]]
+  type <- mod$model.random
+  coefs_signif <- data.frame(list(temp[(temp$`0.025quant` < 0 & temp$`0.975quant` < 0) | (temp$`0.025quant` > 0 & temp$`0.975quant` > 0),] %>% select(rownames, mean, `0.025quant`, `0.975quant`)))
+  return(coefs_signif)
+}
+
+mod_tableauPropre <- function(mods, difSignificativé=F){
+  len <- length(mods)
+  coefs <- NULL
+  dic <- NULL
+  for (i in 1:len){
+    temp <- mods[[i]]$summary.fixed
+    coefs <- c(coefs, row.names(temp))
+    dic <- c(dic, round(mods[[i]]$dic$dic,3))
+  }
+  
+  df <- tibble(coefs=unique(coefs))
+  # nrow <- length(coefs)
+  # df <- as.data.frame(matrix(NA, nrow = nrow, ncol = len))
+  # rownames(df) <- coefs
+  for (i in 1:len){
+    temp <- mods[[i]]$summary.fixed
+    temp$mean <- (round(temp$mean,3))
+    temp$mean <- ifelse(
+          (temp[,3] < 0 & temp[,5] < 0) | (temp[,3] > 0 & temp[,5] > 0),
+          paste0(temp$mean, " *"),
+          paste0(temp$mean)
+        )
+    temp$coefs <- row.names(temp)
+    df <- left_join(df, temp[,c(1,8)], by=join_by(coefs==coefs))
+  }
+  compteur=1
+  Modèle <- "Modèle"
+  Gravité <- "Gravité"
+  Période <- "Période"
+  Région <- "Région"
+  Covid <- "Covid"
+  sC19 <- "Presta. C19"
+  Effets <- "Effets"
+  NAs <- rep(NA, length(names(mods))+1)
+  for (i in names(mods)){
+    Région <- c(Région, "Montréal")
+    Modèle <- c(Modèle, "LGCP")
+    Période <- c(Période, ifelse(grepl("_pre_tE", i), "2018-19", ifelse(grepl("_prePost_tE", i), "2018-21", ifelse(grepl("_post", i), "2020-21", ifelse(grepl("_prePost", i), "2012-21", ifelse(grepl("_pre", i), "2012-19", ifelse(grepl("_post", i), "2020-21", "2012-21")))))))
+    Covid <- c(Covid, ifelse(grepl("_prePost",i), "Pré vs Post", ifelse(grepl("_pre",i), "Pré", ifelse(grepl("_post",i), "Post", "NA"))))
+    Gravité <- c(Gravité, ifelse(grepl("_M", i), "Mortel", ifelse(grepl("_GM", i), "Grave vs Mortel", ifelse(grepl("_L", i), "Léger", ifelse(grepl("_G", i), "Grave", "")))))
+    sC19 <- c(sC19, ifelse(grepl("_sC19", i), "sans_prestaC19", ifelse(any(grepl("_sC19", names(mods))), "avec_prestaC19", "")))
+    Effets <- c(Effets, ifelse(grepl("_PG", i), "PG_seul", ifelse(grepl("_cov", i), "Cov_seul", "PG+Cov")))
+    
+    compteur=compteur+1
+  }
+  # Famille <- gsub("poisson", "Poisson", Famille)
+  # Famille <- gsub("nbinomial", "NB", Famille)
+  # Famille <- gsub("zeroinflatedPoisson1", "ZIP", Famille)
+  
+  df_titre <- t(data.frame(Modèle, Région, Gravité, Période, Covid, sC19, Effets, NAs))
+  rownames(df_titre) <- NULL
+  df_titre <- df_titre[apply(df_titre, 1, function(row) any(row[-1] != "")), ]
+  colnames(df)[-1] <- paste("Modèle", 1:len)
+  colnames(df)[1] <- "Coefficients"
+  colnames(df_titre) <- colnames(df)
+  df[dim(df)[1]+1,] <- rep(NA, dim(df)[2])
+  df[dim(df)[1]+1,] <- t(data.frame(c("DIC", round(dic))))
+  df <- rbind(df_titre,df)
+  
+  if(difSignificativé==T){
+    df <- df %>% mutate(difSignificativé = ifelse(
+      rowSums(across(-Coefficients, ~ grepl("\\*", .))) > 0 & 
+      rowSums(across(-Coefficients, ~ !grepl("\\*", .))) > 0, "***", ""))
+  }
+  return(df)
+}
+
+
+compaVar <- mods_GMcompaVar <- function(var, mods_sum, bestFam=T){
+  len <- dim(mods_sum)[2]
+  tampon <- mods_sum %>%
+    group_by(!!sym(var)) %>%
+    group_split()
+  
+  var_1 <- as.character(tampon[[1]][var][1,])
+  var_2 <- as.character(tampon[[2]][var][1,])
+  
+  tampon_1 <- tampon[[1]] %>% select(-!!sym(var))
+  tampon_2 <- tampon[[2]] %>% select(-!!sym(var))
+  
+  len <- dim(tampon_1)[2]
+  df <- tampon_1 %>%
+    inner_join(tampon_2, by = colnames(tampon_1)[-len], suffix = c("_1", "_2"))
+  
+  PGPP <- ifelse(df$DIC_1 > df$DIC_2, ">", ifelse(df$DIC_1 < df$DIC_2, "<", "="))
+  exclude_cols <- c("DIC_1", "DIC_2")
+  group_by_cols <- setdiff(colnames(df), exclude_cols)
+  
+  df <- df %>% group_by(across(all_of(group_by_cols))) %>%
+    mutate(min_DIC_1_temp = min(DIC_1), min_DIC_2_temp = min(DIC_2)) %>%
+    mutate(min_DIC_1 = ifelse(DIC_1==min_DIC_1_temp, "min_DIC_1", ""), 
+           min_DIC_2 = ifelse(DIC_2==min_DIC_2_temp, "min_DIC_2", "")) %>%
+    select(-min_DIC_1_temp, -min_DIC_2_temp)
+  
+  df_marked <- df %>%
+    mutate(Mark = case_when(
+      min_DIC_1 != "" & min_DIC_2 != "" ~ "***",   # Both min_DIC_1 and min_DIC_2
+      min_DIC_1 != "" ~ "*1*",                    # Only min_DIC_1
+      min_DIC_2 != "" ~ "*2*",                    # Only min_DIC_2
+      TRUE ~ ""                                  # Neither
+    )) %>%
+    select(-min_DIC_1, -min_DIC_2)
+  
+  df_marked <- df_marked %>% add_column("PGPP" = PGPP, .before = "DIC_2") %>%
+    rename(!!paste("DIC_", var_1, sep="") := DIC_1, !!paste("DIC_", var_2, sep="") := DIC_2)
+  df_marked <- df_marked %>%
+    mutate(across(starts_with("DIC"), round))
+  colnames(df_marked)[c(len+1, len+3)] <- ""
+  if(!bestFam){
+    len <- dim(df_marked)[2]
+    df_marked <- df_marked[,-len]
+  }
+  return(df_marked)
+}
+
+extractDIC <- function(mods, rounded=0, bestFam=T){
+  DIC <- NULL
+  for (i in mods){
+    dic_mod <- round(i$dic$dic, rounded)
+    DIC <- c(DIC, dic_mod)
+    nom <- names(mods)
+  }
+  ret <- tibble(nom, DIC)
+  
+  compteur=1
+  Modèle <- "Modèle"
+  Gravité <- "Gravité"
+  Période <- "Période"
+  Région <- "Région"
+  Covid <- "Covid"
+  sC19 <- "Sans Prest. C19"
+  Effets <- "Effets"
+  NAs <- rep(NA, length(names(mods))+1)
+  for (i in names(mods)){
+    Région <- c(Région, "Montréal")
+    Modèle <- c(Modèle, "LGCP")
+    Période <- c(Période, ifelse(grepl("_pre_tE", i), "2018-19", ifelse(grepl("_prePost_tE", i), "2018-21", ifelse(grepl("_post", i), "2020-21", ifelse(grepl("_prePost", i), "2012-21", ifelse(grepl("_pre", i), "2012-19", ifelse(grepl("_post", i), "2020-21", "2012-21")))))))
+    Covid <- c(Covid, ifelse(grepl("_prePost",i), "Pré vs Post", ifelse(grepl("_pre",i), "Pré", ifelse(grepl("_post",i), "Post", "NA"))))
+    Gravité <- c(Gravité, ifelse(grepl("_M", i), "Mortel", ifelse(grepl("_GM", i), "Grave vs Mortel", ifelse(grepl("_L", i), "Léger", ifelse(grepl("_G", i), "Grave", "")))))
+    sC19 <- c(sC19, ifelse(grepl("_sC19", i), "sans_prestaC19", ifelse(any(grepl("_sC19", names(mods))), "avec_prestaC19", "")))
+    Effets <- c(Effets, ifelse(grepl("_PG", i), "PG_seul", ifelse(grepl("_cov", i), "Cov_seul", "PG+Cov")))
+    
+    compteur=compteur+1
+  }
+  # Famille <- gsub("poisson", "Poisson", Famille)
+  # Famille <- gsub("nbinomial", "NB", Famille)
+  # Famille <- gsub("zeroinflatedPoisson1", "ZIP", Famille)
+  
+  df_titre <- (data.frame(Modèle, Région, Gravité, Covid, Période, sC19, Effets))
+  df_titre <- df_titre[-1,]
+  row.names(df_titre) <- NULL
+  df_titre <- df_titre[,!apply(df_titre, 2, function(col) all(col == ""))]
+  ret <- cbind(df_titre, ret)
+  
+  # exclude_cols <- c("DIC", "nom")
+  # group_by_cols <- setdiff(colnames(ret), exclude_cols)
+  # 
+  # ret <- ret %>% group_by(across(all_of(group_by_cols)))
+  # 
+  # ret <- ret %>% group_by(across(all_of(group_by_cols))) %>%
+  #   mutate(min = min(DIC)) %>%
+  #   mutate(ind = ifelse(DIC==min, paste("*", Famille, "*", sep=""), "")) %>%
+  #   select(-min)
+  ret <- ret %>% select(-nom) %>% data.frame()
+  # colnames(ret)[dim(ret)[2]] <- ""
+  if(bestFam==F){
+    ret <- ret[,-dim(ret)[2]]
+  }
+  return(ret)
+}
+
+
+compaHyper <- function(mods){
+  len <- length(mods)
+  mean <- NULL
+  i = 1
+  mean <- data.frame(Hyperparamètres=rownames(mods[[i]]$summary.hyperpar))
+  for(i in 1:len){
+    temp <- mods[[i]]$summary.hyperpar %>% select(mean) %>% round(.,3)
+    mean <- cbind(mean, temp)
+  }
+  rownames(mean) <- NULL
+  
+  compteur=1
+  Modèle <- "Modèle"
+  Gravité <- "Gravité"
+  Période <- "Période"
+  Région <- "Région"
+  Covid <- "Covid"
+  sC19 <- "Presta. C19"
+  Effets <- "Effets"
+  NAs <- rep(NA, length(names(mods))+1)
+  for (i in names(mods)){
+    Région <- c(Région, "Montréal")
+    Modèle <- c(Modèle, "LGCP")
+    Période <- c(Période, ifelse(grepl("_pre_tE", i), "2018-19", ifelse(grepl("_prePost_tE", i), "2018-21", ifelse(grepl("_post", i), "2020-21", ifelse(grepl("_prePost", i), "2012-21", ifelse(grepl("_pre", i), "2012-19", ifelse(grepl("_post", i), "2020-21", "2012-21")))))))
+    Covid <- c(Covid, ifelse(grepl("_prePost",i), "Pré vs Post", ifelse(grepl("_pre",i), "Pré", ifelse(grepl("_post",i), "Post", "NA"))))
+    Gravité <- c(Gravité, ifelse(grepl("_M", i), "Mortel", ifelse(grepl("_GM", i), "Grave vs Mortel", ifelse(grepl("_L", i), "Léger", ifelse(grepl("_G", i), "Grave", "")))))
+    sC19 <- c(sC19, ifelse(grepl("_sC19", i), "sans_prestaC19", ifelse(any(grepl("_sC19", names(mods))), "avec_prestaC19", "")))
+    Effets <- c(Effets, ifelse(grepl("_PG", i), "PG_seul", ifelse(grepl("_cov", i), "Cov_seul", "PG+Cov")))
+    
+    compteur=compteur+1
+  }
+
+  df_titre <- t(data.frame(Modèle, Région, Gravité, Période, Covid, sC19, Effets, NAs))
+  rownames(df_titre) <- NULL
+  df_titre <- df_titre[apply(df_titre, 1, function(row) any(row[-1] != "")), ]
+  colnames(mean)[-1] <- paste("Modèle", 1:len)
+  colnames(df_titre) <- colnames(mean)
+  # mean[dim(mean)[1]+1,] <- rep(NA, dim(mean)[2])
+  mean <- rbind(df_titre,mean)
+  return(mean)
+}
+
+carteLGCP <- function(df, limits=NULL, titre=NULL, x=NULL, y=" "){
+  ggplot() +
+    scale_fill_gradientn(na.value="white", colours = rev(hex), limits=limits, oob = scales::squish) +
+    gg(df, aes(fill = mean)) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),  
+      axis.title.y = element_text(angle = 90, face = "bold", size = 16)
+    ) + 
+    labs(title=titre,
+         x=x,
+         y=y)
+}
+```
+
+# Ajustements covariables de CC
+```{r}
+# mtl_data_cc <- mtl_cc_cov_CT %>%
+#   mutate(C19_benefits_divPopuTimes100 = ifelse(C19_benefits==0,0,C19_benefits/Population*100)) %>%
+#   mutate(revenu_median_menage_div1000 = revenu_median_menage/1000) %>%
+#   mutate(chomeurs_divPopuTimes100 = ifelse(chomeurs==0,0,chomeurs/Population*100),
+#          jeunes_divPopuTimes100 = ifelse(Population==0,0,(a15_19+a20_24)/Population*100),
+#          femmes_divPopuTimes100 = ifelse(Population==0,0,(femmes)/Population*100),
+#          vieux_divPopuTimes100 = ifelse(Population==0,0,(a65_plus)/Population*100)) %>%
+#   mutate(popu_density_div100 = popu_density/100)
+
+mtl_data_cc <- mtl_cc_cov_CT %>%
+  mutate(C19_benefits_divPopuTimes100 = ifelse(C19_bnf==0,0,C19_bnf/Popultn*100)) %>%
+  mutate(revenu_median_menage_div1000 = rvn_md_/1000) %>%
+  mutate(chomeurs_divPopuTimes100 = ifelse(chomers==0,0,chomers/Popultn*100),
+         jeunes_divPopuTimes100 = ifelse(Popultn==0,0,(a15_19+a20_24)/Popultn*100),
+         femmes_divPopuTimes100 = ifelse(Popultn==0,0,(femmes)/Popultn*100),
+         vieux_divPopuTimes100 = ifelse(Popultn==0,0,(a65_pls)/Popultn*100)) %>%
+  mutate(popu_density_div100 = pp_dnst/100)
+```
+
+```{r}
+cor(ifelse(mtl_cc_cov_CT$Popultn==0,0,mtl_cc_cov_CT$a20_24/mtl_cc_cov_CT$Popultn), ifelse(mtl_cc_cov_CT$Popultn==0,0,mtl_cc_cov_CT$chomurs/mtl_cc_cov_CT$Popultn))
+cor(ifelse(mtl_cc_cov_CT$Popultn==0,0,mtl_cc_cov_CT$a15_19/mtl_cc_cov_CT$Popultn), ifelse(mtl_cc_cov_CT$Popultn==0,0,mtl_cc_cov_CT$chomers/mtl_cc_cov_CT$Popultn))
+cor(ifelse(mtl_cc_cov_CT$Popultn==0,0,(mtl_cc_cov_CT$a15_19+mtl_cc_cov_CT$a20_24)/mtl_cc_cov_CT$Popultn), ifelse(mtl_cc_cov_CT$Popultn==0,0,mtl_cc_cov_CT$chomers/mtl_cc_cov_CT$Popultn))
+
+cor(mtl_cc_cov_CT$a65_pls, mtl_cc_cov_CT$chomers)
+
+sf_spp <- cbind(sf_spp, 
+      C19_benefits_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "C19_benefits_divPopuTimes100"),
+      revenu_median_menage_div1000=fillGrid(mtl_data_cc, st_geometry(sf_spp), "revenu_median_menage_div1000"),
+      chomeurs_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "chomeurs_divPopuTimes100"),
+      jeunes_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "jeunes_divPopuTimes100"),
+      femmes_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "femmes_divPopuTimes100"),
+      vieux_divPopuTimes100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "vieux_divPopuTimes100"),
+      popu_density_div100=fillGrid(mtl_data_cc, st_geometry(sf_spp), "popu_density_div100"))
+
+cor_spp <- sf_spp %>% data.frame %>%
+  select(fCStop_pond,
+         hopit_times10,
+         pourcRes,
+         pourcIndComm,
+         rEns,
+         C19_benefits_divPopuTimes100,
+         revenu_median_menage_div1000,
+         chomeurs_divPopuTimes100,
+         jeunes_divPopuTimes100,
+         femmes_divPopuTimes100,
+         vieux_divPopuTimes100,
+         popu_density_div100
+         ) 
+
+cor_matrix <- cor(cor_spp)
+cor_upper <- cor_matrix
+cor_upper[lower.tri(cor_upper, diag = TRUE)] <- NA
+high_cor_pairs <- which(abs(cor_upper) > (0.5), arr.ind = TRUE)
+result_mun <- data.frame(
+  var1 = rownames(cor_matrix)[high_cor_pairs[, 1]],
+  var2 = colnames(cor_matrix)[high_cor_pairs[, 2]],
+  correlation = cor_matrix[high_cor_pairs]
+)
+stargazer(result_mun, type="text", summary=F)
+```
+
+
+
+# Entraînement des modèles 
+
+## Mortel
+### Sans processus spatial
+
+```{r}
+comp_spde_sC19 <- coordinates ~
+  Intercept(1) +
+  feuCircul_Stop(fillGrid(sf_spp, .data., "fCStop_pond"), model="linear") +
+  hopitaux(fillGrid(sf_spp, .data., "hopit_times10"), model="linear") +
+  revenuMedian(fillGrid(mtl_data_cc, .data., "revenu_median_menage_div1000")) +
+  pourcentage_chomeurs(fillGrid(mtl_data_cc, .data., "chomeurs_divPopuTimes100")) +
+  densitéPopulation(fillGrid(mtl_data_cc, .data., "popu_density_div100")) +
+  routes(fillGrid(sf_spp, .data., "rEns"), model="linear") +
+  pourcentage_zoneResidentielle(fillGrid(sf_spp, .data., "pourcRes"), model="linear") +
+  pourcentage_zoneIndusComm(fillGrid(sf_spp, .data., "pourcIndComm"), model="linear") +
+  
+  pourcentage_jeunes(fillGrid(mtl_data_cc, .data., "jeunes_divPopuTimes100")) +
+  # pourcentage_femmes(fillGrid(mtl_data_cc, .data., "femmes_divPopuTimes100")) +
+  pourcentage_vieux(fillGrid(mtl_data_cc, .data., "vieux_divPopuTimes100"))
+
+comp_spde <- coordinates ~
+  pourcentage_prestaC19(fillGrid(mtl_data_cc, .data., "C19_benefits_divPopuTimes100")) +
+  Intercept(1) +
+  feuCircul_Stop(fillGrid(sf_spp, .data., "fCStop_pond"), model="linear") +
+  hopitaux(fillGrid(sf_spp, .data., "hopit_times10"), model="linear") +
+  revenuMedian(fillGrid(mtl_data_cc, .data., "revenu_median_menage_div1000")) +
+  pourcentage_chomeurs(fillGrid(mtl_data_cc, .data., "chomeurs_divPopuTimes100")) +
+  
+  densitéPopulation(fillGrid(mtl_data_cc, .data., "popu_density_div100")) +
+  routes(fillGrid(sf_spp, .data., "rEns"), model="linear") +
+  pourcentage_zoneResidentielle(fillGrid(sf_spp, .data., "pourcRes"), model="linear") +
+  pourcentage_zoneIndusComm(fillGrid(sf_spp, .data., "pourcIndComm"), model="linear") +
+  
+  pourcentage_jeunes(fillGrid(mtl_data_cc, .data., "jeunes_divPopuTimes100")) +
+  # #pourcentage_femmes(fillGrid(mtl_data_cc, .data., "femmes_divPopuTimes100")) +
+  pourcentage_vieux(fillGrid(mtl_data_cc, .data., "vieux_divPopuTimes100"))
+```
+
+```{r}
+tic()
+fit_M_cov_sC19 <- lgcp(comp_spde_sC19, 
+              as(mtl_M, "Spatial"), 
+              samplers=as(mtlpoly_4, "Spatial"), 
+              domain = list(coordinates = mtlIle_mesh)#,
+              #options = list(verbose=T)
+              )
+toc() # 19 sec
+summary(fit_M_cov_sC19)
+
+tic()
+fit_M_pre_tE_cov_sC19 <- lgcp(comp_spde_sC19, 
+                     as(mtl_M %>% filter(ind_covid==1), "Spatial"),
+                     samplers=as(mtlpoly_4, "Spatial"), 
+                     domain = list(coordinates = mtlIle_mesh)#,
+                     #options = list(verbose=T)
+                     )
+toc() # 17 sec
+summary(fit_M_pre_tE_cov_sC19)
+
+tic()
+fit_M_pre_cov_sC19 <- lgcp(comp_spde_sC19, 
+                  as(mtl_M %>% filter(ind_covid %in% c(0,1)), "Spatial"),
+                  samplers=as(mtlpoly_4, "Spatial"), 
+                  domain = list(coordinates = mtlIle_mesh))
+toc() # 18 sec
+# summary(fit_M_pre_cov_sC19)
+
+
+tic()
+fit_M_post_cov_sC19 <- lgcp(comp_spde_sC19,
+                   as(mtl_M %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   #options=list(verbose=TRUE)
+                   )
+toc() # 16 sec
+# summary(fit_M_post_cov_sC19)
+```
+
+```{r}
+tic()
+fit_M_cov <- lgcp(comp_spde, 
+              as(mtl_M, "Spatial"), 
+              samplers=as(mtlpoly_4, "Spatial"), 
+              domain = list(coordinates = mtlIle_mesh)#,
+              #options = list(verbose=T)
+              )
+toc() # 18 sec
+# summary(fit_M_cov)
+
+tic()
+fit_M_pre_tE_cov <- lgcp(comp_spde, 
+                     as(mtl_M %>% filter(ind_covid==1), "Spatial"),
+                     samplers=as(mtlpoly_4, "Spatial"), 
+                     domain = list(coordinates = mtlIle_mesh)#,
+                     #options = list(verbose=T)
+                     )
+toc() # 18 sec
+# summary(fit_M_pre_tE_cov)
+
+tic()
+fit_M_pre_cov <- lgcp(comp_spde, 
+                  as(mtl_M %>% filter(ind_covid %in% c(0,1)), "Spatial"),
+                  samplers=as(mtlpoly_4, "Spatial"), 
+                  domain = list(coordinates = mtlIle_mesh))
+toc() # 20 sec
+# summary(fit_M_pre_cov)
+
+
+tic()
+fit_M_post_cov <- lgcp(comp_spde,
+                   as(mtl_M %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   #options=list(verbose=TRUE)
+                   )
+toc() # 18 sec
+# summary(fit_M_post_cov)
+```
+
+#### Comparaison des coefs
+```{r}
+stargazer(mod_tableauPropre(list(fit_M_cov_sC19=fit_M_cov_sC19,
+                                 fit_M_pre_cov_sC19=fit_M_pre_cov_sC19,
+                                 fit_M_pre_tE_cov_sC19=fit_M_pre_tE_cov_sC19,
+                                 fit_M_post_cov_sC19=fit_M_post_cov_sC19
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+```
+
+D'abord, seule coef. significatifs différents entre complet (1) et Pré (2) est chômeurs.
+Chômeurs n'est significatif que pour les modèles complet (1) et Post (4). Le coefficient est d'ailleurs bien plus élevé pour le modèle Post.
+
+Coefficients pour lesquels Post est différents:
+  revenu médian signif partout sauf post
+  pourcRes est signif partout sauf post
+  
+Popu density ne semble pas signif car pas assez de données de TÉ
+  
+
+Post: revenu médian post non-signif, signif partout ailleurs
+  -0.018 -> 0.982 -> -1.8%, pour chaque augmentation de 1000$ de revenu médian dans le SR, l'intensité d'accidents (le nombre attendus d'accidents par kilomètre carré) diminue d'un facteur de 1.8%, en gardant toutes les autres variables constantes - PRÉ
+  
+PréPost et Post: Chômeurs est signif., bref pré. est le seul non-signif.
+  Augmentation d'un facteur de 22.8% (exp(0.205) = 1.2275) de l'intensité avec chaque hausse de 1% de chômeurs dans le SR.
+  
+Popu. density: Seulement non-signif avec tÉ, bref sûrement car pas assez de données
+Post: pourcRes, seulement non-signif. Semble indiquer qu'il y avait moins
+
+
+## Grave
+### Cov seulement
+```{r}
+tic()
+fit_G_cov_sC19 <- lgcp(comp_spde_sC19, 
+              as(mtl_G, "Spatial"), 
+              samplers=as(mtlpoly_4, "Spatial"), 
+              domain = list(coordinates = mtlIle_mesh)#,
+              #options = list(verbose=T)
+              )
+toc() # 20 sec
+# summary(fit_G_cov_sC19)
+
+tic()
+fit_G_pre_tE_cov_sC19 <- lgcp(comp_spde_sC19, 
+                     as(mtl_G %>% filter(ind_covid==1), "Spatial"),
+                     samplers=as(mtlpoly_4, "Spatial"), 
+                     domain = list(coordinates = mtlIle_mesh)#,
+                     #options = list(verbose=T)
+                     )
+toc() # 16  sec
+# summary(fit_G_pre_tE_cov_sC19)
+
+tic()
+fit_G_pre_cov_sC19 <- lgcp(comp_spde_sC19, 
+                  as(mtl_G %>% filter(ind_covid %in% c(0,1)), "Spatial"),
+                  samplers=as(mtlpoly_4, "Spatial"), 
+                  domain = list(coordinates = mtlIle_mesh))
+toc() # 20 sec
+# summary(fit_G_pre_cov_sC19)
+
+
+tic()
+fit_G_post_cov_sC19 <- lgcp(comp_spde_sC19,
+                   as(mtl_G %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   #options=list(verbose=TRUE)
+                   )
+toc() # 16 sec
+# summary(fit_G_post_cov_sC19)
+```
+
+```{r}
+tic()
+fit_G_cov <- lgcp(comp_spde, 
+              as(mtl_G, "Spatial"), 
+              samplers=as(mtlpoly_4, "Spatial"), 
+              domain = list(coordinates = mtlIle_mesh)#,
+              #options = list(verbose=T)
+              )
+toc() # 24 sec
+# summary(fit_G_cov)
+
+tic()
+fit_G_pre_tE_cov <- lgcp(comp_spde, 
+                     as(mtl_G %>% filter(ind_covid==1), "Spatial"),
+                     samplers=as(mtlpoly_4, "Spatial"), 
+                     domain = list(coordinates = mtlIle_mesh)#,
+                     #options = list(verbose=T)
+                     )
+toc() # 19  sec
+# summary(fit_G_pre_tE_cov)
+
+tic()
+fit_G_pre_cov <- lgcp(comp_spde, 
+                  as(mtl_G %>% filter(ind_covid %in% c(0,1)), "Spatial"),
+                  samplers=as(mtlpoly_4, "Spatial"), 
+                  domain = list(coordinates = mtlIle_mesh))
+toc() # 23 sec
+# summary(fit_G_pre_cov)
+
+
+tic()
+fit_G_post_cov <- lgcp(comp_spde,
+                   as(mtl_G %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   #options=list(verbose=TRUE)
+                   )
+toc() # 18 sec
+# summary(fit_G_post_cov)
+```
+
+
+#### Comparaison des coefficients
+```{r}
+stargazer(mod_tableauPropre(list(fit_G_cov_sC19=fit_G_cov_sC19,
+                                 fit_G_pre_cov_sC19=fit_G_pre_cov_sC19,
+                                 fit_G_pre_tE_cov_sC19=fit_G_pre_tE_cov_sC19,
+                                 fit_G_post_cov_sC19=fit_G_post_cov_sC19
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+```
+Complet (1) et Pré (2) sont pareil
+Pré et post tÉ
+  Pré tÉ : fCStop_pond et rEns
+  Post: Chomeurs signifs post comme avec M
+  
+Seul point commun de M et G, chomeurs signifs post covid et ne l'était pas pré... beaucoup plus signif avec M.
+  
+
+### Comparaison DIC presta. C19
+```{r}
+# À rerouler les modèles avec C19 car ils sont renommer juste en bas!
+stargazer(compaVar("sC19", extractDIC(list(
+                          fit_M_cov=fit_M_cov,
+                          fit_M_pre_cov=fit_M_pre_cov,
+                          fit_M_pre_tE_cov=fit_M_pre_tE_cov,
+                          fit_M_post_cov=fit_M_post_cov,
+                          fit_M_cov_sC19=fit_M_cov_sC19,
+                          fit_M_pre_cov_sC19=fit_M_pre_cov_sC19,
+                          fit_M_pre_tE_cov_sC19=fit_M_pre_tE_cov_sC19,
+                          fit_M_post_cov_sC19=fit_M_post_cov_sC19,
+                          fit_G_cov=fit_G_cov,
+                          fit_G_pre_cov=fit_G_pre_cov,
+                          fit_G_pre_tE_cov=fit_G_pre_tE_cov,
+                          fit_G_post_cov=fit_G_post_cov,
+                          fit_G_cov_sC19=fit_G_cov_sC19,
+                          fit_G_pre_cov_sC19=fit_G_pre_cov_sC19,
+                          fit_G_pre_tE_cov_sC19=fit_G_pre_tE_cov_sC19,
+                          fit_G_post_cov_sC19=fit_G_post_cov_sC19)),bestFam = F),
+          summary=F, rownames = F, type="text")
+
+# tab: DIC prestaC19
+stargazer(extractDIC(list(
+                fit_M_cov=fit_M_cov,
+                fit_M_cov_sC19=fit_M_cov_sC19,
+                fit_M_pre_cov=fit_M_pre_cov,
+                fit_M_pre_cov_sC19=fit_M_pre_cov_sC19,
+                fit_M_pre_tE_cov=fit_M_pre_tE_cov,
+                fit_M_pre_tE_cov_sC19=fit_M_pre_tE_cov_sC19,
+                fit_M_post_cov=fit_M_post_cov,
+                fit_M_post_cov_sC19=fit_M_post_cov_sC19,
+                fit_G_cov=fit_G_cov,
+                fit_G_cov_sC19=fit_G_cov_sC19,
+                fit_G_pre_cov=fit_G_pre_cov,
+                fit_G_pre_cov_sC19=fit_G_pre_cov_sC19,
+                fit_G_pre_tE_cov=fit_G_pre_tE_cov,
+                fit_G_pre_tE_cov_sC19=fit_G_pre_tE_cov_sC19,
+                fit_G_post_cov=fit_G_post_cov,
+                fit_G_post_cov_sC19=fit_G_post_cov_sC19)) %>%
+   select(-Modèle, -Région, -Covid, -Effets)%>%
+     mutate(DIC=as.character(DIC)),
+          summary=F, rownames = F, type="text", digits=0)
+summary(fit_M_cov)
+```
+Dans tous les cas, le DIC est meilleur sans la variable sur les prestations de Covid-19
+
+```{r}
+fit_M_cov <- fit_M_cov_sC19
+fit_M_pre_cov <- fit_M_pre_cov_sC19
+fit_M_pre_tE_cov <- fit_M_pre_tE_cov_sC19
+fit_M_post_cov <- fit_M_post_cov_sC19
+
+fit_G_cov <- fit_G_cov_sC19
+fit_G_pre_cov <- fit_G_pre_cov_sC19
+fit_G_pre_tE_cov <- fit_G_pre_tE_cov_sC19
+fit_G_post_cov <- fit_G_post_cov_sC19
+```
+### Comparaison des coefs
+
+```{r}
+# tab: coefs lgcp_cov_M ####
+stargazer(mod_tableauPropre(list(fit_M_cov=fit_M_cov,
+                                 fit_M_pre_cov=fit_M_pre_cov,
+                                 fit_M_pre_tE_cov=fit_M_pre_tE_cov,
+                                 fit_M_post_cov=fit_M_post_cov
+                                 ), difSignificativé = F) %>% filter(!(Coefficients %in% c("Modèle", "Région", "Gravité", "Effets", "DIC"))),
+          type="latex", summary=F, rownames = F)
+
+# tab: coefs lgcp_cov_G ####
+stargazer(mod_tableauPropre(list(fit_G_cov=fit_G_cov,
+                                 fit_G_pre_cov=fit_G_pre_cov,
+                                 fit_G_pre_tE_cov=fit_G_pre_tE_cov,
+                                 fit_G_post_cov=fit_G_post_cov
+                                 ), difSignificativé = F) %>% filter(!(Coefficients %in% c("Modèle", "Région", "Gravité", "Effets", "DIC"))),
+          type="latex", summary=F, rownames = F)
+
+stargazer(mod_tableauPropre(list(fit_M_pre_tE_cov=fit_M_pre_tE_cov,
+                                 fit_M_post_cov=fit_M_post_cov,
+                                 fit_G_pre_tE_cov=fit_G_pre_tE_cov,
+                                 fit_G_post_cov=fit_G_post_cov
+                                 ), difSignificativé = T), 
+          type="latex", summary=F, rownames = F)
+```
+
+
+## Carte des pré tÉ et post pour grave et mortel
+
+```{r}
+pred.df <- fm_pixels(mtlIle_mesh, format = "sp")
+
+int_M_pre_tE <-  predict(fit_M_pre_tE_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux)
+                                         #pourcentage_femmes
+                   
+                 )
+
+int_M_post <-  predict(fit_M_post_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux)
+                                         #pourcentage_femmes
+                   
+                 )
+
+int_G_pre_tE <-  predict(fit_G_pre_tE_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux)
+                                         #pourcentage_femmes
+                   
+                 )
+
+int_G_post <-  predict(fit_G_post_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux)
+                                         #pourcentage_femmes
+                   
+                 )
+
+carteLGCP(int_M_pre_tE$logIntensité, c(-7,2))
+carteLGCP(int_M_post$logIntensité)
+carteLGCP(int_G_pre_tE$logIntensité)
+carteLGCP(int_G_post$logIntensité)
+
+plots <- ggarrange(carteLGCP(int_M_pre_tE$logIntensité, c(-7,2), titre = "Pré-COVID (2018-19)", y="Accidents mortels"),
+          carteLGCP(int_M_post$logIntensité, c(-7,2), titre="COVID (2020-21)"),
+          carteLGCP(int_G_pre_tE$logIntensité, c(-4,2), y="Accidents graves"),
+          carteLGCP(int_G_post$logIntensité, c(-4,2)),
+          nrow=2, ncol=2)
+
+# fig: carte cov
+annotate_figure(plots#, top = text_grob("Cartes des prédictions des modèles basés uniquement sur covariables", 
+               #face = "bold", size = 18)
+               )
+
+int_G_pre_tE <-  predict(fit_G_pre_tE_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm
+                   )
+                 )
+
+
+int_M_pre_tE_chom <-  predict(fit_M_pre_tE_cov,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(pourcentage_chomeurs),
+                   logIntensité = pourcentage_chomeurs 
+                                  
+                   )
+                 )
+int_M_post_chom <-  predict(fit_M_post_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(pourcentage_chomeurs),
+                   logIntensité = pourcentage_chomeurs 
+                                  
+                   )
+                 )
+int_G_pre_tE_chom <-  predict(fit_G_pre_tE_cov,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(pourcentage_chomeurs),
+                   logIntensité = pourcentage_chomeurs 
+                                  
+                   )
+                 )
+int_G_post_chom <-  predict(fit_G_post_cov_sC19,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(pourcentage_chomeurs),
+                   logIntensité = pourcentage_chomeurs 
+                                  
+                   )
+                 )
+
+carteLGCP(int_M_pre_tE_chom$logIntensité)
+carteLGCP(int_M_post_chom$logIntensité)
+carteLGCP(int_G_pre_tE_chom$logIntensité)
+carteLGCP(int_G_post_chom$logIntensité)
+```
+Les accidents mortels semblent bien moins concentré post covid, et beaucoup mieux réparti.
+Pour les accidents graves, il semble y avoir une intensité moins forte au centre de l'île, mais sinon, tout est très semblable.
+
+Regardons des modèles avec un processus spatial pour confirmer ces intuitions.
+
+## Mortel et Grave
+### PG seulement
+```{r}
+pcmatern_G_PG <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(0.1, 0.01), #c(0.05, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(0.5, 0.01)) #c(1, 0.01))    # PC-prior on sigma: P(sigma > 1) = 0.01
+
+pcmatern_M_PG <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(5, 0.01),  #c(5, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(1, 0.01))  #c(1, 0.01))    # PC-prior on sigma: P(sigma > 1) = 0.01
+
+stargazer(tibble("Hyperparamètres"=c("P(portée < __ ) = 0.01", "P(écart-type > __ ) = 0.01"), "Mortel (pré et post)" = c(5, 1), "Grave (pré et post)" = c(0.1, 0.5) ), type="latex", summary=F, rownames=F)
+
+
+tic()
+fit_M_pre_tE_PG <- lgcp(coordinates ~
+                            Intercept(1) +
+                            mySmooth(coordinates, model = pcmatern_M_PG),
+                   as(mtl_M %>% filter(ind_covid==1), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   # options = list(verbose=T)
+                   )
+toc() # 14 sec
+
+
+tic()
+fit_M_post_PG <- lgcp(coordinates ~
+                            Intercept(1) +
+                            mySmooth(coordinates, model = pcmatern_M_PG),
+                   as(mtl_M %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   # options = list(verbose=T)
+                   )
+toc() # 13 sec
+
+tic()
+fit_G_pre_tE_PG <- lgcp(coordinates ~
+                            Intercept(1) +
+                            mySmooth(coordinates, model = pcmatern_G_PG),
+                   as(mtl_G %>% filter(ind_covid==1), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   # options = list(verbose=T)
+                   )
+toc() # 21 sec
+
+tic()
+fit_G_post_PG <- lgcp(coordinates ~
+                            Intercept(1) +
+                            mySmooth(coordinates, model = pcmatern_G_PG),
+                   as(mtl_G %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh), 
+                   # options = list(verbose=T)
+                   )
+toc() # 18 sec
+
+summary(fit_M_pre_tE_PG)
+summary(fit_M_post_PG)
+summary(fit_G_pre_tE_PG)
+summary(fit_G_post_PG)
+
+
+```
+Très difficile de fitter G_post... Redondant à travers plusieurs modèles... Résultats très dépendant des hyperparamètres, nous avons gardé un résultat qui rendait un champ spatial lisse et stable dans la gravité.
+
+#### Comparaison des DIC
+```{r}
+stargazer(compaVar(var = "Effets", extractDIC(list(
+                          fit_M_pre_tE_cov = fit_M_pre_tE_cov,
+                          fit_M_pre_tE_PG = fit_M_pre_tE_PG,
+                          fit_M_post_cov = fit_M_post_cov,
+                          fit_M_post_PG = fit_M_post_PG,
+                          
+                          fit_G_pre_tE_cov = fit_G_pre_tE_cov,
+                          fit_G_pre_tE_PG = fit_G_pre_tE_PG,
+                          fit_G_post_cov = fit_G_post_cov,
+                          fit_G_post_PG = fit_G_post_PG)), bestFam = F),
+          summary=F, rownames = F, type="text")
+
+# tab: compa_covPG ####
+stargazer(extractDIC(list(
+                          fit_M_pre_tE_cov = fit_M_pre_tE_cov,
+                          fit_M_pre_tE_PG = fit_M_pre_tE_PG,
+                          fit_M_post_cov = fit_M_post_cov,
+                          fit_M_post_PG = fit_M_post_PG,
+                          
+                          fit_G_pre_tE_cov = fit_G_pre_tE_cov,
+                          fit_G_pre_tE_PG = fit_G_pre_tE_PG,
+                          fit_G_post_cov = fit_G_post_cov,
+                          fit_G_post_PG = fit_G_post_PG)) %>%
+            select(-Modèle, -Région, -Covid),
+          summary=F, rownames = F, type="text", digit.separate = 0)
+
+
+# summary(fit_M_post_cov)
+
+test <- extractDIC(list(
+                          fit_M_pre_tE_cov = fit_M_pre_tE_cov,
+                          fit_M_pre_tE_PG = fit_M_pre_tE_PG,
+                          fit_M_post_cov = fit_M_post_cov,
+                          fit_M_post_PG = fit_M_post_PG,
+                          
+                          fit_G_pre_tE_cov = fit_G_pre_tE_cov,
+                          fit_G_pre_tE_PG = fit_G_pre_tE_PG,
+                          fit_G_post_cov = fit_G_post_cov,
+                          fit_G_post_PG = fit_G_post_PG)) %>%
+            select(-Modèle, -Région, -Covid)
+
+```
+3 des 4 sont meilleurs avec le processus spatial seul... On rest dans tous les cas dans des écheles très semblables.
+
+
+#### Carte des pré et post tÉ
+```{r}
+int_M_pre_PG <-  predict(fit_M_pre_tE_PG,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         mySmooth),
+                   logIntensité = Intercept+
+                                         mySmooth
+                   )
+                 )
+int_M_post_PG <-  predict(fit_M_post_PG,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         mySmooth),
+                   logIntensité = Intercept+
+                                         mySmooth
+                   )
+                 )
+int_G_pre_PG <-  predict(fit_G_pre_tE_PG,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         mySmooth),
+                   logIntensité = Intercept+
+                                         mySmooth
+                   )
+                 )
+int_G_post_PG <-  predict(fit_G_post_PG,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         mySmooth),
+                   logIntensité = Intercept+
+                                         mySmooth
+                   )
+                 )
+
+carteLGCP(int_M_pre_PG$logIntensité)
+carteLGCP(int_M_post_PG$logIntensité)
+carteLGCP(int_G_pre_PG$logIntensité) + geom_point(data=data.frame(st_coordinates(mtl_G %>% filter(ind_covid==1))), aes(x=X, y=Y), colour="black", size=0.1)
+carteLGCP(int_G_post_PG$logIntensité) + geom_point(data=data.frame(st_coordinates(mtl_G %>% filter(ind_covid==2))), aes(x=X, y=Y), colour="black", size=0.1)
+
+plots <- ggarrange(carteLGCP(int_M_pre_PG$logIntensité, c(-5, -1), titre = "Pré-COVID (2018-19)", y="Accidents mortels"),
+          carteLGCP(int_M_post_PG$logIntensité, c(-5, -1), titre="COVID (2020-21)"),
+          carteLGCP(int_G_pre_PG$logIntensité, c(-2, 1), y="Accidents graves"),
+          carteLGCP(int_G_post_PG$logIntensité, c(-2, 1)),
+          nrow=2, ncol=2)
+
+# fig: carte pg ####
+annotate_figure(plots#, top = text_grob("Cartes des prédictions des modèles basés uniquement sur le processus spatial", 
+              # face = "bold", size = 18)
+              )
+```
+Dans les deux cas, les accidents semblent moins concentrés au centre-ville de Montréal, assez logique puisqu'il y avait moins de gens à Montréal.
+
+## Mortel et Grave
+### PG + cov
+
+```{r}
+pcmatern_G <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(0.1, 0.01), #c(0.05, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(0.5, 0.01))#c(1, 0.01))    # PC-prior on sigma: P(sigma > 1) = 0.01
+
+pcmatern_M <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(5, 0.01),  #c(5, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(1, 0.01))  #c(1, 0.01))    # PC-prior on sigma: P(sigma > 1) = 0.01
+
+comp_M <- coordinates ~
+  Intercept(1) +
+  feuCircul_Stop(fillGrid(sf_spp, .data., "fCStop_pond"), model="linear") +
+  hopitaux(fillGrid(sf_spp, .data., "hopit_times10"), model="linear") +
+  revenuMedian(fillGrid(mtl_data_cc, .data., "revenu_median_menage_div1000")) +
+  pourcentage_chomeurs(fillGrid(mtl_data_cc, .data., "chomeurs_divPopuTimes100")) +
+  densitéPopulation(fillGrid(mtl_data_cc, .data., "popu_density_div100")) +
+  routes(fillGrid(sf_spp, .data., "rEns"), model="linear") +
+  pourcentage_zoneResidentielle(fillGrid(sf_spp, .data., "pourcRes"), model="linear") +
+  pourcentage_zoneIndusComm(fillGrid(sf_spp, .data., "pourcIndComm"), model="linear") + 
+  mySmooth(coordinates, model = pcmatern_M) +
+  
+  pourcentage_jeunes(fillGrid(mtl_data_cc, .data., "jeunes_divPopuTimes100")) +
+  # #pourcentage_femmes(fillGrid(mtl_data_cc, .data., "femmes_divPopuTimes100")) +
+  pourcentage_vieux(fillGrid(mtl_data_cc, .data., "vieux_divPopuTimes100"))
+
+comp_G <- coordinates ~
+  Intercept(1) +
+  feuCircul_Stop(fillGrid(sf_spp, .data., "fCStop_pond"), model="linear") +
+  hopitaux(fillGrid(sf_spp, .data., "hopit_times10"), model="linear") +
+  revenuMedian(fillGrid(mtl_data_cc, .data., "revenu_median_menage_div1000")) +
+  pourcentage_chomeurs(fillGrid(mtl_data_cc, .data., "chomeurs_divPopuTimes100")) +
+  densitéPopulation(fillGrid(mtl_data_cc, .data., "popu_density_div100")) +
+  routes(fillGrid(sf_spp, .data., "rEns"), model="linear") +
+  pourcentage_zoneResidentielle(fillGrid(sf_spp, .data., "pourcRes"), model="linear") +
+  pourcentage_zoneIndusComm(fillGrid(sf_spp, .data., "pourcIndComm"), model="linear") + 
+  mySmooth(coordinates, model = pcmatern_G)+
+  
+  pourcentage_jeunes(fillGrid(mtl_data_cc, .data., "jeunes_divPopuTimes100")) +
+  #pourcentage_femmes(fillGrid(mtl_data_cc, .data., "femmes_divPopuTimes100")) +
+  pourcentage_vieux(fillGrid(mtl_data_cc, .data., "vieux_divPopuTimes100"))
+```
+
+```{r}
+tic()
+fit_M_pre_tE <- lgcp(comp_M,
+                   as(mtl_M %>% filter(ind_covid==1), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh) 
+                   #options = list(verbose=T)
+                   )
+toc() # 27 sec
+summary(fit_M_pre_tE)
+
+tic()
+fit_M_post <- lgcp(comp_M,
+                   as(mtl_M %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh)#, 
+                   # options = list(verbose=T)
+                   )
+toc() # 29 sec
+summary(fit_M_post)
+tic()
+fit_G_pre_tE <- lgcp(comp_G,
+                   as(mtl_G %>% filter(ind_covid==1), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh) #, 
+                   #options = list(verbose=T)
+                   )
+toc() # 33 sec
+
+tic()
+fit_G_post <- lgcp(comp_G,
+                   as(mtl_G %>% filter(ind_covid==2), "Spatial"), 
+                   samplers=as(mtlpoly_4, "Spatial"), 
+                   domain = list(coordinates = mtlIle_mesh) #, 
+                   #options = list(verbose=T)
+                   )
+toc() # 33 sec
+
+summary(fit_M_pre_tE)
+summary(fit_M_post)
+summary(fit_G_pre_tE)
+summary(fit_G_post)
+```
+
+### Vérif avec pré complet
+```{r}
+tic()
+fit_M_pre <- lgcp(comp_G, 
+                  as(mtl_M %>% filter(ind_covid %in% c(0,1)), "Spatial"),
+                  samplers=as(mtlpoly_4, "Spatial"), 
+                  domain = list(coordinates = mtlIle_mesh))
+toc() # 35 sec
+summary(fit_M_pre)
+
+
+```
+
+```{r}
+summary(fit_M_pre_tE)
+```
+
+
+#### DIC
+```{r}
+stargazer(compaVar("Effets", extractDIC(list(
+                          fit_M_pre_tE_cov = fit_M_pre_tE_cov,
+                          fit_M_pre_tE = fit_M_pre_tE,
+                          fit_M_post_cov = fit_M_post_cov,
+                          fit_M_post = fit_M_post,
+                          
+                          fit_G_pre_tE_cov = fit_G_pre_tE_cov,
+                          fit_G_pre_tE = fit_G_pre_tE,
+                          fit_G_post_cov = fit_G_post_cov,
+                          fit_G_post = fit_G_post)),bestFam = F),
+          summary=F, rownames = F, type="text")
+```
+
+```{r}
+stargazer(compaVar("Effets", extractDIC(list(
+                          fit_M_pre_tE_PG = fit_M_pre_tE_PG,
+                          fit_M_pre_tE = fit_M_pre_tE,
+                          fit_M_post_PG = fit_M_post_PG,
+                          fit_M_post = fit_M_post,
+                          
+                          fit_G_pre_tE_PG = fit_G_pre_tE_PG,
+                          fit_G_pre_tE = fit_G_pre_tE,
+                          fit_G_post_PG = fit_G_post_PG,
+                          fit_G_post = fit_G_post)),bestFam = F),
+          summary=F, rownames = F, type="text")
+```
+PG+Cov est tjrs moins bon que les modèles avec soit l'un ou l'autre... Sûrement dû à l'ajout de complexité.
+
+#### Coefs
+Est-ce que les coefs signifs restent les mêmes?
+```{r}
+stargazer(mod_tableauPropre(list(fit_M_pre_tE_cov = fit_M_pre_tE_cov,
+                                 fit_M_pre_tE = fit_M_pre_tE
+                                 # fit_M_pre=fit_M_pre
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+fit_M_pre_tE_cov$summary.fixed[4,1:5]
+fit_M_pre_tE$summary.fixed[4,1:5]
+```
+revenu médian n'est plus signif, cependant, c'était déjà tellement serré...
+
+```{r}
+stargazer(mod_tableauPropre(list(fit_M_post_cov = fit_M_post_cov,
+                                 fit_M_post = fit_M_post
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+```
+Identiques
+```{r}
+stargazer(mod_tableauPropre(list(fit_G_pre_tE_cov = fit_G_pre_tE_cov,
+                                 fit_G_pre_tE = fit_G_pre_tE
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+
+fit_G_pre_tE_cov$summary.fixed[9,1:5]
+fit_G_pre_tE$summary.fixed[9,1:5]
+```
+pourcIndCom devient signif. Encore une fois, était déjà très limite.
+
+```{r}
+stargazer(mod_tableauPropre(list(fit_G_post_cov = fit_G_post_cov,
+                                 fit_G_post = fit_G_post
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+```
+Identique
+
+#### Carte cov+PG
+```{r}
+int_M_pre <-  predict(fit_M_pre_tE,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux,
+                                         #pourcentage_femmes,
+                   PG = exp(Intercept+mySmooth),
+                   logPG = mySmooth
+                 ))
+int_M_post <-  predict(fit_M_post,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux,
+                                         #pourcentage_femmes,
+                   PG = exp(mySmooth),
+                   logPG = mySmooth
+                 ))
+int_G_pre <-  predict(fit_G_pre_tE,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux,
+                                         #pourcentage_femmes,
+                   PG = exp(mySmooth),
+                   logPG = mySmooth
+                  ))
+
+int_G_post <-  predict(fit_G_post,
+                 pred.df, ~ data.frame(
+                   Intensité = exp(Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux),
+                                         #pourcentage_femmes),
+                   logIntensité = Intercept+
+                                         feuCircul_Stop +
+                                         hopitaux +
+                                         revenuMedian +
+                                         pourcentage_chomeurs +
+                                         densitéPopulation +
+                                         routes +
+                                         pourcentage_zoneResidentielle +
+                                         pourcentage_zoneIndusComm +
+                                         mySmooth+
+                                         pourcentage_jeunes+
+                                         pourcentage_vieux,
+                                         #pourcentage_femmes,
+                   PG = exp(mySmooth),
+                   logPG = mySmooth
+                 ))
+
+
+int_M_pre_complet <-  predict(fit_M_pre,
+                 pred.df, ~ data.frame(
+                   PG = exp(mySmooth),
+                   logPG = mySmooth
+                   )
+                 )
+
+
+# ggarrange(carteLGCP(int_M_pre$logIntensité, c(-6,1)),
+#           carteLGCP(int_M_post$logIntensité, c(-6,1)),
+#           carteLGCP(int_G_pre$logIntensité, c(-4,2)),
+#           carteLGCP(int_G_post$logIntensité, c(-4,2)),
+#           nrow=2, ncol=2)
+
+
+plots <- ggarrange(
+          carteLGCP(int_M_pre$logPG, titre = "Pré-COVID (2018-19)", y="Accidents mortels"),
+          carteLGCP(int_M_post$logPG, titre="COVID (2020-21)"),
+          carteLGCP(int_G_pre$logPG, y="Accidents graves"),
+          carteLGCP(int_G_post$logPG),
+          nrow=2, ncol=2)
+
+# fig: carte covPG ####
+annotate_figure(plots#, top = text_grob("Cartes des prédictions des processurs spatiaux (Z(s)) des modèles utilisant \n aussi les covariables", 
+               #face = "bold", size = 18)
+               )
+
+
+
+carteLGCP(int_M_pre_complet$logPG, titre = "Cartes des prédictions du processurs spatial (Z(s)) \npour la accidents mortels de 2012 à 2019")
+
+
+
+
+# ips <- fm_int(mtlIle_mesh, mtlpoly_4, format="sp")
+# 
+# Lambda_G_pre_tE <- predict(fit_G_pre_tE, ips, ~ sum(weight * exp(Intercept+
+#                                          feuCircul_Stop +
+#                                          hopitaux +
+#                                          revenuMedian +
+#                                          pourcentage_chomeurs +
+#                                          densitéPopulation +
+#                                          routes +
+#                                          pourcentage_zoneResidentielle +
+#                                          pourcentage_zoneIndusComm +
+#                                          mySmooth)))
+# 
+# Lambda_G_post <- predict(fit_G_post, ips, ~ sum(weight * exp(Intercept+
+#                                          feuCircul_Stop +
+#                                          hopitaux +
+#                                          revenuMedian +
+#                                          pourcentage_chomeurs +
+#                                          densitéPopulation +
+#                                          routes +
+#                                          pourcentage_zoneResidentielle +
+#                                          pourcentage_zoneIndusComm +
+#                                          mySmooth)))
+# Lambda_M_pre_tE <- predict(fit_M_pre_tE, ips, ~ sum(weight * exp(Intercept+
+#                                          feuCircul_Stop +
+#                                          hopitaux +
+#                                          revenuMedian +
+#                                          pourcentage_chomeurs +
+#                                          densitéPopulation +
+#                                          routes +
+#                                          pourcentage_zoneResidentielle +
+#                                          pourcentage_zoneIndusComm +
+#                                          mySmooth)))
+# 
+# Lambda_M_post <- predict(fit_M_post, ips, ~ sum(weight * exp(Intercept+
+#                                          feuCircul_Stop +
+#                                          hopitaux +
+#                                          revenuMedian +
+#                                          pourcentage_chomeurs +
+#                                          densitéPopulation +
+#                                          routes +
+#                                          pourcentage_zoneResidentielle +
+#                                          pourcentage_zoneIndusComm +
+#                                          mySmooth)))
+
+# Lambda_M_pre_tE # 58
+# Lambda_M_post # 50
+# Lambda_G_pre_tE # 285
+# Lambda_G_post # 222
+```
+Difficile de ressortir grand chose... G_post n'est que très peu expliqué par le processus spatial.
+M sont assez semblables, mais simplement pas le même niveau
+
+## PréPost Mortel
+
+### Cov + PG
+```{r}
+pcmatern_prePost <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(1, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(1, 0.01))      # PC-prior on sigma: P(sigma > 1) = 0.01
+
+comp_prePost <- coordinates ~
+  Intercept(1) +
+  Difference(coordinates, model = pcmatern_prePost) +
+  Common(coordinates, model = pcmatern_prePost) +
+  feuCircul_Stop(fillGrid(sf_spp, .data., "fCStop_pond"), model="linear") +
+  hopitaux(fillGrid(sf_spp, .data., "hopit_times10"), model="linear") +
+  revenuMedian(fillGrid(mtl_data_cc, .data., "revenu_median_menage_div1000")) +
+  pourcentage_chomeurs(fillGrid(mtl_data_cc, .data., "chomeurs_divPopuTimes100")) +
+  densitéPopulation(fillGrid(mtl_data_cc, .data., "popu_density_div100")) +
+  routes(fillGrid(sf_spp, .data., "rEns"), model="linear") +
+  pourcentage_zoneResidentielle(fillGrid(sf_spp, .data., "pourcRes"), model="linear") +
+  pourcentage_zoneIndusComm(fillGrid(sf_spp, .data., "pourcIndComm"), model="linear")
+```
+  
+```{r}
+fml.pre <- coordinates ~
+  Intercept +
+  feuCircul_Stop +
+  hopitaux +
+  revenuMedian +
+  pourcentage_chomeurs +
+  densitéPopulation +
+  routes +
+  pourcentage_zoneResidentielle +
+  pourcentage_zoneIndusComm +
+  Common - 
+  Difference/2
+
+fml.post <- coordinates ~
+  Intercept +
+  feuCircul_Stop +
+  hopitaux +
+  revenuMedian +
+  pourcentage_chomeurs +
+  densitéPopulation +
+  routes +
+  pourcentage_zoneResidentielle +
+  pourcentage_zoneIndusComm +
+  Common + 
+  Difference/2
+
+lik_pre <- like("cp",
+  formula = fml.pre,
+  data = as(mtl_M %>% filter(ind_covid==1), "Spatial"),
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+lik_post <- like("cp",
+  formula = fml.post,
+  data = as(mtl_M %>% filter(ind_covid==2), "Spatial"),
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+
+tic()
+fit_compa_M_prePost_tE <- bru(comp_prePost, lik_pre, lik_post,
+  options = list(
+    control.inla = list(int.strategy = "eb"),
+    bru_max_iter = 1,
+    verbose=T
+  )
+)
+toc() # 64 sec
+summary(fit_compa_M_prePost_tE)
+```
+
+#### a rerouler
+
+```{r}
+pcmatern_pp_com_M <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(0.5, 0.01),#c(0.05, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(0.5, 0.01))#c(0.05, 0.01))    # PC-prior on sigma: P(sigma > 1) = 0.01
+
+pcmatern_pp_dif_M <- inla.spde2.pcmatern(mesh = mtlIle_mesh,
+  alpha = 2,
+  prior.range = c(1, 0.01), #c(0.05, 0.01),  # PC-prior on range: P(practic.range < 1) = 0.01
+  prior.sigma = c(5, 0.01)) #c(0.05, 0.01))    # PC-prior on sigma: P(sigma > 1) = 0.01
+
+comp_prePost_M <- coordinates ~
+  Intercept(1) +
+  Difference(coordinates, model = pcmatern_pp_dif_M) +
+  Common(coordinates, model = pcmatern_pp_com_M) +
+  feuCircul_Stop(fillGrid(sf_spp, .data., "fCStop_pond"), model="linear") +
+  hopitaux(fillGrid(sf_spp, .data., "hopit_times10"), model="linear") +
+  revenuMedian(fillGrid(mtl_data_cc, .data., "revenu_median_menage_div1000")) +
+  pourcentage_chomeurs(fillGrid(mtl_data_cc, .data., "chomeurs_divPopuTimes100")) +
+  densitéPopulation(fillGrid(mtl_data_cc, .data., "popu_density_div100")) +
+  routes(fillGrid(sf_spp, .data., "rEns"), model="linear") +
+  pourcentage_zoneResidentielle(fillGrid(sf_spp, .data., "pourcRes"), model="linear") +
+  pourcentage_zoneIndusComm(fillGrid(sf_spp, .data., "pourcIndComm"), model="linear")
+
+fml.pre <- coordinates ~
+  Intercept +
+  feuCircul_Stop +
+  hopitaux +
+  revenuMedian +
+  pourcentage_chomeurs +
+  densitéPopulation +
+  routes +
+  pourcentage_zoneResidentielle +
+  pourcentage_zoneIndusComm +
+  Common - 
+  Difference/2
+
+fml.post <- coordinates ~
+  Intercept +
+  feuCircul_Stop +
+  hopitaux +
+  revenuMedian +
+  pourcentage_chomeurs +
+  densitéPopulation +
+  routes +
+  pourcentage_zoneResidentielle +
+  pourcentage_zoneIndusComm +
+  Common + 
+  Difference/2
+
+lik_pre <- like("cp",
+  formula = fml.pre,
+  data = as(mtl_M %>% filter(ind_covid==1), "Spatial"),
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+lik_post <- like("cp",
+  formula = fml.post,
+  data = as(mtl_M %>% filter(ind_covid==2), "Spatial"),
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+
+
+tic()
+fit_compa_prePost_M <- bru(comp_prePost_M, lik_pre, lik_post,
+  options = list(
+    control.inla = list(int.strategy = "eb"),
+    bru_max_iter = 1,
+    verbose=T
+  )
+)
+toc() #91 sec
+
+summary(fit_compa_prePost_M)
+```
+
+
+### PG
+```{r}
+comp_prePost_PG <- coordinates ~
+  Intercept(1) +
+  Difference(coordinates, model = pcmatern_prePost) +
+  Common(coordinates, model = pcmatern_prePost) 
+
+fml.pre_PG <- coordinates ~
+  Intercept +
+  Common - 
+  Difference/2
+
+fml.post_PG <- coordinates ~
+  Intercept +
+  Common + 
+  Difference/2
+
+lik_pre <- like("cp",
+  formula = fml.pre_PG,
+  data = as(mtl_M %>% filter(ind_covid==1), "Spatial"),
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+lik_post <- like("cp",
+  formula = fml.post_PG,
+  data = as(mtl_M %>% filter(ind_covid==2), "Spatial"),
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+
+tic()
+fit_compa_M_prePost_tE_PG <- bru(comp_prePost, lik_pre, lik_post,
+  options = list(
+    control.inla = list(int.strategy = "eb"),
+    bru_max_iter = 1,
+    verbose=T
+  )
+)
+toc() # 38 sec
+
+summary(fit_compa_M_prePost_tE_PG)
+```
+
+#### DIC 
+```{r}
+stargazer(compaVar("Effets", extractDIC(list(
+                              fit_compa_M_prePost_tE_PG = fit_compa_M_prePost_tE_PG,
+                              fit_compa_M_prePost_tE = fit_compa_M_prePost_tE
+                          )),bestFam = F),
+          summary=F, rownames = F, type="text")
+```
+
+#### Coefs
+```{r}
+stargazer(mod_tableauPropre(list(fit_M_pre_tE = fit_M_pre_tE,
+                                 fit_M_post = fit_M_post,
+                                 fit_compa_prePost_M = fit_compa_prePost_M,
+                                 fit_compa_M_prePost_tE = fit_compa_M_prePost_tE
+                                 ), difSignificativé = T), 
+          type="text", summary=F)
+```
+PG seul est encore mieux selon le DIC.
+
+Si on compare les modèles pré et post avec PG et cov, les seules différences de significativité sont des entre deux.
+
+
+#### Carte
+
+Retrouve-t-on les mêmes processus spatiaux
+```{r}
+int_M_pp <-  predict(fit_compa_M_prePost_tE,
+                 pred.df, ~ data.frame(
+                                      logCommun = Common,
+                                      logDifférence = Difference,
+                                      logPre = Common-0.5*Difference,
+                                      logPost = Common+0.5*Difference
+                   )
+                 )
+
+int_M_pp_PG <-  predict(fit_compa_M_prePost_tE_PG,
+                 pred.df, ~ data.frame(
+                                      logCommun = Common,
+                                      logDifférence = Difference,
+                                      logPre = Common-0.5*Difference,
+                                      logPost = Common+0.5*Difference
+                   )
+                 )
+
+
+
+carteLGCP(int_M_pp$logPre)
+carteLGCP(int_M_pp$logPost)
+carteLGCP(int_M_pp$logCommun)
+carteLGCP(int_M_pp$logDifférence)
+
+ggarrange(
+          carteLGCP(int_M_pp$logCommun, titre = "Commun"),
+          carteLGCP(int_M_pp$logDifférence, titre = "Différence"),
+          carteLGCP(int_M_pp$logPre, titre = "Pré-Covid (2018-19) \n(Commun-0.5*Différence)", limits = c(-0.1, 0.2)),
+          carteLGCP(int_M_pp$logPost, titre = "Post-Covid (2020-21)\n(Commun+0.5*Différence)", limits = c(-0.1, 0.2)))
+
+ head(int_M_pp$logDifférence)
+int_M_pp$logDifférence %>% data.frame%>%filter((q0.025>0 & q0.975>0)|(q0.025<0 & q0.975<0))
+# Car tout passe par la différence...
+
+carteLGCP(int_M_pp_PG$logPre)
+carteLGCP(int_M_pp_PG$logPost)
+carteLGCP(int_M_pp_PG$logCommun)
+carteLGCP(int_M_pp_PG$logDifférence)
+
+ggarrange(carteLGCP(int_M_pp_PG$logPre, titre = "Pré-Covid (2018-19)"),
+          carteLGCP(int_M_pp_PG$logPost, titre = "Post-Covid (2020-21)"),
+          carteLGCP(int_M_pp_PG$logCommun, titre = "Commun"),
+          carteLGCP(int_M_pp_PG$logDifférence, titre = "Différence"))
+```
+Comme PG+cov donne un commun quasi nul, regardons la différence d'un modèle sans cov.
+
+Des 2 dif, ce qu'on voit, c'est qu'on retire au milieu dans la ville, et on ajoute aux extémités est et ouest.
+
+
+## PréPost Grave
+```{r}
+lik_pre_G <- like("cp",
+  formula = fml.pre,
+  data = as(mtl_G %>% filter(ind_covid%in% c(0,1)), "Spatial"), 
+  domain = list(coordinates = mtlIle_mesh)
+)
+lik_post_G <- like("cp",
+  formula = fml.post,
+  data = as(mtl_G %>% filter(ind_covid==2), "Spatial"), 
+  samplers=as(mtlpoly_4, "Spatial"),
+  domain = list(coordinates = mtlIle_mesh)
+)
+
+tic()
+fit_compa_prePost_G <- bru(comp_prePost, lik_pre_G, lik_post_G,
+  options = list(
+    control.inla = list(int.strategy = "eb"),
+    bru_max_iter = 1,
+    verbose=TRUE
+  )
+)
+toc() # 564 sec
+
+summary(fit_compa_prePost_G)
+```
+Pour une raison inconnu, bcp de difficulté à fitter un modèle de 2018-19... mais avec un pré total, ca se fait...
+
+
+#### DIC
+```{r}
+stargazer(compaVar("Effets", extractDIC(list(
+                              fit_compa_prePost_G = fit_compa_prePost_G,
+                              fit_G_cov=fit_G_cov
+                          ))[,-4],bestFam = F),
+          summary=F, rownames = F, type="text")
+
+stargazer(mod_tableauPropre(list(# fit_compa_prePost_G_PG = fit_compa_prePost_G_PG,
+                         fit_compa_prePost_G = fit_compa_prePost_G,
+                         fit_G_cov=fit_G_cov), difSignificativé = T), 
+          type="text", summary=F)
+```
+DIfficile de réellement sortir quelque chose, mais mêmes coefs signifs et dans le même sens.
+
+```{r}
+int_G_pp <-  predict(fit_compa_prePost_G,
+                 pred.df, ~ data.frame(
+                                      logCommun = Common,
+                                      logDifférence = Difference,
+                                      logPre = Intercept + Common-0.5*Difference,
+                                      logPost = Intercept + Common+0.5*Difference
+                   )
+                 )
+
+carteLGCP(int_G_pp$logPre)
+carteLGCP(int_G_pp$logPost)
+carteLGCP(int_G_pp$logCommun)
+carteLGCP(int_G_pp$logDifférence)
+```
+
+
+Fin ici, nous avons essayé plus, mais sans réussite.
+
+
+# Spatio-temporel
+```{r}
+pcmatern_M_ST <- inla.spde2.pcmatern(mtlIle_mesh,
+                              prior.range = c(0.5, 0.01), 
+                              prior.sigma = c(1, 0.01)  
+)
+
+mtl_M$AN_nb <- as.numeric(as.factor(mtl_M$AN))
+cmp <- coordinates + AN_nb ~ Intercept(1) +
+  mySmooth(
+    coordinates,
+    model = pcmatern_M_ST,
+    group = AN_nb,
+    ngroup = 10
+  )
+
+
+
+ppxl <- fm_pixels(mtlIle_mesh, mask = as(mtlpoly_4, "Spatial"), format = "sp")
+ppxl_all <- fm_cprod(ppxl, data.frame(AN_nb = seq_len(10)))
+
+tic()
+fit_M_ST <- lgcp(cmp,
+            data = as(mtl_M, "Spatial"),
+            samplers = as(mtlpoly_4, "Spatial"),
+            domain = list(
+              coordinates = mtlIle_mesh,
+              AN_nb = seq_len(10)
+            ),
+            options = list(verbose=T)
+)
+toc() # 800 sec
+
+summary(fit_M_ST)
+
+
+tic()
+lambda2 <- predict(
+  fit_M_ST,
+  ppxl_all,
+  ~ data.frame(AN_nb = AN_nb, lambda = exp(mySmooth + Intercept))
+) 
+toc() # 2390 sec
+
+
+year_labels <- c('1' = '2012', '2' = '2013', '3' = '2014', '4' = '2015', 
+                 '5' = '2016', '6' = '2017', '7' = '2018', '8' = '2019',
+                 '9' = '2020', '10' = '2021')
+pl2 <- ggplot() +
+  gg(as(lambda2, "SpatialPixelsDataFrame"), aes(fill = mean)) +
+  # gg(as(mtl_M, "Spatial"), size = 0.3) +
+  scale_fill_gradientn(na.value="white", colours = rev(hex), limits=c(0, 0.28)) +
+  facet_wrap(~AN_nb, labeller = labeller(AN_nb = year_labels)) +
+  coord_equal() +
+  theme(
+      axis.text = element_blank(),       
+      axis.title = element_blank(),      
+      axis.ticks = element_blank(),      
+      strip.text = element_text(size = 12, face = "bold"), 
+    )
+pl2
+
+# 
+# cmp <- coordinates + AN_nb ~ Intercept(1) +
+#   mySmooth(
+#     coordinates,
+#     model = pcmatern_M_ST,
+#     group = AN_nb,
+#     ngroup = 10,
+#     control.group = list(model = "rw1")
+#   )
+# 
+# 
+# 
+# # ppxl <- fm_pixels(mtlIle_mesh, mask = as(mtlpoly_4, "Spatial"), format = "sp")
+# # ppxl_all <- fm_cprod(ppxl, data.frame(AN_nb = seq_len(10)))
+# 
+# tic()
+# fit_M_ST_2 <- lgcp(cmp,
+#             data = as(mtl_M, "Spatial"),
+#             samplers = as(mtlpoly_4, "Spatial"),
+#             domain = list(
+#               coordinates = mtlIle_mesh,
+#               AN_nb = seq_len(10)
+#             ),
+#             options = list(verbose=T)
+# )
+# toc() # 800 sec
+# summary(fit_M_ST_2)
+```
+N'apporte pas grand chose...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

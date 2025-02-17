@@ -1,0 +1,399 @@
+---
+title: "Exportation autres"
+author: "Edgar Lanoue"
+date: "2024-05-15"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# Figures
+fig: comp expo
+
+###########################
+
+Changer les liens vers vos données:
+```{r}
+path <- "C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/SR - Propre"
+
+pathBrutes <- file.path(path, "Donnees", "Brutes")
+pathBrutesWeb <- file.path(pathBrutes, "web")
+pathTraitees <- file.path(path, "Donnees", "Traitees")
+```
+
+# CRS
+```{r}
+library(sf)
+crs <- st_crs("NAD83")
+projUTM <- st_crs("+proj=utm +zone=18 +datum=NAD83 +units=km +no_defs")
+```
+
+Pareil à travers tous les codes!
+###########################
+
+
+Package à inclure
+```{r}
+library(tictoc)
+library(SpatialEpi)
+
+library(osmdata)
+library(mapview)
+library(tidyverse)
+library(sf)
+library(tictoc)
+library(sp)
+
+library(cancensus)
+library(INLA)
+library(inlabru)
+```
+
+
+# Débit Québec
+Pour avoir les routes simplement
+```{r}
+qc_route <- st_read(paste(pathBrutes, "/Débit Qc/cir_v_geo_sectn_trafc_locls/cir_v_geo_sectn_trafc_locls.shp", sep=""))
+qc_route <- st_transform(qc_route, crs)
+```
+
+Certains segments de routes n'ont aucunes données sur les débits (NA sur toutes les années)
+Retirons ces segments de routes. (provient de DJMA_DVKT - S21).
+Renommons qc_route par djma_sansNA puisque dorénavant, ce sera utilisé pour les débits!
+```{r}
+djma <- qc_route
+
+# Enlevons les sections qui ont des NAs partout et mettons de l'ordre dans le jdD
+djma <- (djma[,c(1,2,6,18,20,22:41)])
+djma <- djma[, c(1:5, seq(7,25,by=2), 26)]
+an <- 2022:2013
+colnames(djma)[6:15] <- an
+ind_NA <- rowSums(is.na(djma[,6:15])) == ncol(djma[,6:15])-1
+djma_sansNA <- djma[!ind_NA,]
+
+
+save(djma_sansNA, file = paste(pathTraitees, "/djma_sansNA.Rda", sep=""))
+
+```
+
+# Exposition
+L'exposition est calculée à l'aide de la quantité totale de déplacements (VKT). Qc sort des données sur les débits de certaines routes. Cependant, ces données sont très incomplètes. Elles commencent en 2013, et ont énormémement de données manquantes.
+
+Nous essaierons 2 estimations pour calculer la quantité totale de déplacements:
+1 - Sommer débits par région administrative
+      Un segment de route appartient à une région administrative si son centroïde en fait partie.
+2 - Utiliser les DJMA*km de routes par région administrative de Tarcisio.
+
+Dans les deux cas, nous normaliserons ensuite par population de muncp ou MRC (population provenant de CC_21)
+
+## 1
+```{r}
+load(paste(pathTraitees, "/djma_sansNA.Rda", sep=""))
+qc_rAdm <- st_read(paste(pathBrutes, "/Frontières administratives/Quebec/regio_s.shp", sep=""))
+
+# Centroides des routes (qui ont des données)
+djma_sansNA$centroids <- st_centroid(djma_sansNA$geometry)
+
+# Intersection entre rAdm et centroides de routes
+int <- st_intersects(djma_sansNA$centroids, qc_rAdm$geometry)
+# Verif
+  # table(rowSums(as.matrix(int))) # Une seule route dont le centroide tombe a l'extérieur... pas si mal!
+
+# Trouver la rAdm de chaque routes et associer
+get_true_positions <- function(row) {
+  which(row)
+}
+int_position <- tibble(rAdm=as.numeric(apply(as.matrix(int), 1, get_true_positions)))
+djma_sansNA$CD_rAdm <- qc_rAdm[int_position$rAdm,]$RES_CO_REG
+djma_sansNA$NOM_rAdm <- qc_rAdm[int_position$rAdm,]$RES_NM_REG
+
+djma_sum_rAdm <- djma_sansNA %>% st_drop_geometry %>%
+  mutate(across(num_range("20",13:22), as.numeric)) %>%
+  group_by(CD_rAdm, NOM_rAdm) %>%
+  summarise(across(starts_with("20"), ~ sum(.x, na.rm = TRUE))) %>%
+  pivot_longer(
+    cols = starts_with("20"), 
+    names_to = "An",       
+    values_to = "sommeDJMA"  
+  ) %>%
+  filter(!is.na(CD_rAdm))
+djma_sum_rAdm$CD_rAdm <- as.numeric(djma_sum_rAdm$CD_rAdm)
+```
+
+## 2
+
+```{r}
+vkt <- read_sf(dsn =paste(pathBrutes, "/Débit Qc/Débits Tarcisio", sep=""), layer = "merged_final_4distance")
+vkt <- st_transform(vkt, crs)
+vkt$RES_NM_REG <- gsub("\\?", "–", vkt$RES_NM_REG)
+vkt_join <- left_join(as_tibble(vkt), as_tibble(qc_rAdm), by=join_by(RES_NM_REG==RES_NM_REG))
+vkt_join$RES_CO_REG <- as.numeric(vkt_join$RES_CO_REG)
+
+# Verif
+  sum(vkt$DJMA)
+  sum(vkt_join$DJMA) # Correct, pas trpo de perte avec les routes qui chevauchent 2 rAdm
+  table(is.na(vkt_join$DJMA_km)) # aucun NA dans les routes de Tarcisio
+
+vkt_sum_rAdm <- vkt_join %>% group_by(RES_CO_REG, RES_NM_REG, ANNEE) %>%
+  distinct(RES_CO_REG, ANNEE, DJMA_km, .keep_all = TRUE) %>%
+  summarise(sommeVKT=sum(DJMA_km)) %>%
+  filter(!(grepl("Inter", RES_NM_REG) | is.na(RES_NM_REG)))
+vkt_sum_rAdm
+
+mois_ordre <- c("Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre")
+vkt_sum_rAdm_PM <- vkt_join %>% group_by(RES_CO_REG, RES_NM_REG, ANNEE, MOIS) %>%
+  distinct(RES_CO_REG, ANNEE, MOIS, .keep_all = TRUE) %>%
+  filter(RES_CO_REG!=10) %>%
+  summarise(sommeVKT=sum(DJMM_km)) %>%
+  filter(!(grepl("Inter", RES_NM_REG) | is.na(RES_NM_REG) | is.na(MOIS)))
+vkt_sum_rAdm_PM$MOIS_num <- match(vkt_sum_rAdm_PM$MOIS, mois_ordre)
+
+# Verif
+  # table(vkt_sum_rAdm_PM$MOIS) # 144=17*9
+  # table(vkt_sum_rAdm_PM$RES_CO_REG) # 108=12*9
+```
+On enlève directement le NQC car trop peu d'observation... 
+
+### Comparaison des 2 exposition avec le nombre d'accidents par année (et par gravité)
+```{r}
+# Données accidents
+load(file.path(pathTraitees, "data_acc.Rda"))
+
+acc_PJ <- data_acc %>%
+  distinct(NO_SEQ_COLL, .keep_all = T) %>%
+  mutate(ind_plusDe1Veh = ifelse(NB_VEH_IMPLIQUES_ACCDN > 1, 1, 0)) %>%
+  group_by(DT_ACCDN, gravite, REG_ADM, MRC, CD_MUNCP) %>%
+  summarise(nbAcc = length(DT_ACCDN), nbMorts = sum(NB_MORTS), nbGraves=sum(NB_BLESSES_GRAVES) ,  nbLegers=sum(NB_BLESSES_LEGERS), nbVeh=sum(NB_VEH_IMPLIQUES_ACCDN), nb_plusDe1Veh=sum(ind_plusDe1Veh==1)) %>%
+  mutate(An = year(DT_ACCDN))
+acc_PJ$gravite <- factor(acc_PJ$gravite, levels = c("Dommages matériels seulement", "Léger", "Grave", "Mortel"))
+
+acc_PA <- acc_PJ %>%
+  group_by(An, gravite, REG_ADM, MRC, CD_MUNCP) %>%
+  summarise(nbAcc = sum(nbAcc), nbMorts = sum(nbMorts), nbGraves=sum(nbGraves), nbLegers=sum(nbLegers), nbVeh=sum(nbVeh), nb_plusDe1Veh=sum(nb_plusDe1Veh))
+```
+
+```{r}
+# fig: comp expo ####
+ggplot() +
+  geom_line(acc_PA %>% filter(An>=2014) %>% group_by(An) %>% summarise(nbAcc=sum(nbAcc)) %>% mutate(total=sum(nbAcc)), mapping=aes(x=factor(An), y= nbAcc/total, group="Accidents annuels avec vitime/décès", color="Accidents annuels avec vitimes/décès"), lwd=1.5) + 
+  geom_line(djma_sum_rAdm %>% filter(An>=2014)  %>% group_by(An) %>% summarise(sommeDJMA=sum(sommeDJMA)) %>% mutate(total=sum(sommeDJMA)), mapping=aes(x=An, y=sommeDJMA/total, group="Exposition naïve (somme DJMA)", color="Exposition naïve (somme DJMA)"), lwd=1.5) +
+  geom_line(vkt_sum_rAdm %>% group_by(ANNEE) %>% summarise(sommeVKT=sum(sommeVKT)) %>% mutate(total=sum(sommeVKT)), mapping=aes(x=ANNEE, y=sommeVKT/total, group="Exposition plus fidèle à la quantité de déplacements (somme VKT)", color="Exposition plus fidèle à la quantité de déplacements (somme VKT)"), lwd=1.5) +
+  labs(x="Année", y="Proportion (Total de l'année/Total sur 9 ans)", title="Comparaison des expositions et des accidents par année") +
+  labs(color='Légende')  +   
+  theme(plot.title = element_text(hjust = 0.5, face="bold")) +
+  scale_color_manual(labels = c("Accidents annuels \navec vitime/décès",
+                                "Exposition naïve (somme DJMA)",
+                                "Exposition plus fidèle à la quantité\n de déplacements (somme VKT)"), values =c(4,2,3))
+```
+Proportions sont nb_anneeEnCours/nb_toutesLesAnnees
+On remaruqe que les 2 expositions semblent suivre la tendance du nombre d'accidents, et que les deux exposition se ressemblent beaucoup.
+
+Regardons maintenant par gravité
+```{r}
+# ggplot() +
+#   geom_col(acc_PA %>% filter(An>=2014) %>% group_by(An, gravite) %>% summarise(nbAcc=sum(nbAcc)) %>% group_by(gravite) %>% mutate(total=sum(nbAcc)), mapping=aes(x=factor(An), y= nbAcc/total), group="Acc") + 
+#   facet_wrap(~gravite) +
+#   geom_line(djma_sum_rAdm %>% filter(An>=2014)  %>% group_by(An) %>% summarise(sommeDJMA=sum(sommeDJMA)) %>% mutate(total=sum(sommeDJMA)), mapping=aes(x=An, y=sommeDJMA/total, group="sommeDJMA", color="sommeDJMA"), lwd=1.5) +
+#   geom_line(vkt_sum_rAdm %>% group_by(ANNEE) %>% summarise(sommeVKT=sum(sommeVKT)) %>% mutate(total=sum(sommeVKT)), mapping=aes(x=ANNEE, y=sommeVKT/total, group="sommeVKT", color="sommeVKT"), lwd=1.5) +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   labs(x="Année", y="Proportion (Total de l'année / Total sur 9 ans)", title="Comparaison des expositions par gravité d'accidents") +   theme(plot.title = element_text(hjust = 0.5))
+# 
+# summary(vkt_sum_rAdm_PM$sommeVKT)
+# summary(vkt_sum_rAdm$sommeVKT)
+
+# vkt_sum_rAdm %>% filter(RES_CO_REG==6) %>% view()
+# vkt_sum_rAdm_PM %>% filter(RES_CO_REG==6) %>% view()
+```
+À part accident mortel, semble pas trop mal. Et comme les accidents mortels sont les moins nombreux... bien
+
+Regardons maintenant par rAdm
+```{r, include=F}
+# library(readxl)
+# abbrev <- read_excel("C:/Users/edgar/OneDrive/Bureau/Ecole/HEC/E23/SAAQ/Abbreviations Regions Administratives.xlsx")
+# acc_PA <- left_join(acc_PA, abbrev, by=join_by(REG_ADM==`Code numérique`))
+# djma_sum_rAdm <- left_join(djma_sum_rAdm, abbrev, by=join_by(CD_rAdm==`Code numérique`))
+# vkt_sum_rAdm <- left_join(vkt_sum_rAdm, abbrev, by=join_by(RES_CO_REG==`Code numérique`))
+# # vkt_sum_rAdm <- left_join(vkt_sum_rAdm, abbrev, by=join_by(RES_CO_REG==`Code numérique`))
+```
+
+```{r}
+# ggplot() +
+#   geom_col(acc_PA %>% filter(An>=2014) %>% group_by(An, REG_ADM, `Abréviation courante`) %>% summarise(nbAcc=sum(nbAcc)) %>% group_by(REG_ADM, `Abréviation courante`) %>% mutate(total=sum(nbAcc)), mapping=aes(x=factor(An), y= nbAcc/total), group="Acc") + 
+#   geom_line(djma_sum_rAdm %>% filter(An>=2014)  %>% group_by(An, CD_rAdm, `Abréviation courante`) %>% summarise(sommeDJMA=sum(sommeDJMA)) %>% group_by(CD_rAdm) %>% mutate(total=sum(sommeDJMA)), mapping=aes(x=An, y=sommeDJMA/total, group="sommeDJMA", color="sommeDJMA"), lwd=1.5) +
+#   facet_wrap(~CD_rAdm) +
+#   geom_line(vkt_sum_rAdm %>% group_by(ANNEE, RES_CO_REG, `Abréviation courante`) %>% summarise(sommeVKT=sum(sommeVKT)) %>% group_by(RES_CO_REG) %>% mutate(total=sum(sommeVKT)), mapping=aes(x=ANNEE, y=sommeVKT/total, group="sommeVKT", color="sommeVKT"), lwd=1.5) +
+#   facet_wrap(~`Abréviation courante`) +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   labs(x="Année", y="Proportion (Total de l'année / Total sur 9 ans)", title="Comparaison des expositions par rAdm")
+```
+sommeVKT est plus stable, mais les deux sont semblables! 2014 C-N este bizarre pour sommeDJMA
+
+Regardons finalement le total d'accidents de 2014 à 2022 pour chaque rAdm et comparons au total par rAdm sur 10 les 9 ans.
+
+```{r}
+# ggplot() +
+#   geom_col(acc_PA %>% filter(An>=2014) %>% group_by(REG_ADM, `Abréviation courante`) %>% summarise(nbAcc=sum(nbAcc)) %>% ungroup() %>%  mutate(total=sum(nbAcc)), mapping=aes(x=`Abréviation courante`, y= nbAcc/total), group="Acc") + 
+#   geom_line(djma_sum_rAdm %>% filter(An>=2014)  %>% group_by(CD_rAdm, `Abréviation courante`) %>% summarise(sommeDJMA=sum(sommeDJMA)) %>% ungroup() %>% mutate(total=sum(sommeDJMA)), mapping=aes(x=`Abréviation courante`, y=sommeDJMA/total, group="sommeDJMA", color="sommeDJMA"), lwd=1.5) +
+#   geom_line(vkt_sum_rAdm %>% group_by(RES_CO_REG, `Abréviation courante`) %>% summarise(sommeVKT=sum(sommeVKT)) %>% ungroup() %>% mutate(total=sum(sommeVKT)), mapping=aes(x=`Abréviation courante`, y=sommeVKT/total, group="sommeVKT", color="sommeVKT"), lwd=1.5) +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   labs(x="Région administrative", y="Proportion (Total de la région / Total de toutes les régions)", title="Comparaison des expositions par rAdm")
+```
+On voit que la différence entre les deux provient surtout de Mtl. Les VKT sont plus faibles à Mtl, probablement car la région est simplement plus petite, donc moins de km par segments de routes...
+
+# Exposition - normalisation avec population
+On doit normaliser car on a présentement des indicateurs de débits par région administrative, on les veut par municipalités et MRC.
+```{r}
+load(file.path(pathTraitees, "muncp_cc_cov.Rda"))
+load(file.path(pathTraitees, "mrc_cc_cov.Rda"))
+
+
+# Verif
+  sum(muncp_cc_cov$Popultn)
+  sum(mrc_cc_cov$Popultn)
+
+# Verif de concordance des muncp/mrc avec
+  # Intersection entre rAdm et centroides des muncp et MRC
+  # muncp
+  int <- st_intersects(st_centroid(muncp_cc_cov), qc_rAdm$geometry)
+  int_position <- tibble(rAdm=as.numeric(apply(as.matrix(int), 1, get_true_positions)))
+  temp_muncp <- muncp_cc_cov
+  temp_muncp$CD_rAdm <- as.numeric(qc_rAdm[int_position$rAdm,]$RES_CO_REG)
+  table(temp_muncp$CD_rAdm==muncp_cc_cov$CD_rAdm)
+  mapview(qc_rAdm) + mapview(muncp_cc_cov[temp_muncp$CD_rAdm!=muncp_cc_cov$CD_rAdm,]) + mapview(st_centroid(muncp_cc_cov[temp_muncp$CD_rAdm!=muncp_cc_cov$CD_rAdm,]), cex=2, color="red")
+  
+  # mrc
+  int <- st_intersects(st_centroid(mrc_cc_cov), qc_rAdm$geometry)
+  int_position <- tibble(rAdm=as.numeric(apply(as.matrix(int), 1, get_true_positions)))
+  temp_mrc <- mrc_cc_cov
+  temp_mrc$CD_rAdm <- as.numeric(qc_rAdm[int_position$rAdm,]$RES_CO_REG)
+  table(temp_mrc$CD_rAdm==mrc_cc_cov$CD_rAdm)
+```
+
+### Joindre jdD avec population des MRC/muncp et ceux avec exposition
+```{r}
+# muncp
+djmaPopu_muncp <- left_join(djma_sum_rAdm %>% select(CD_rAdm, An, NOM_rAdm, sommeDJMA), muncp_cc_cov %>% select(CD_rAdm, CD_MUN, Popultn), by=join_by(CD_rAdm))
+
+vktPopu_muncp <- left_join(vkt_sum_rAdm %>% select(RES_CO_REG, ANNEE, RES_CO_REG, sommeVKT), muncp_cc_cov %>% select(CD_rAdm, CD_MUN, Popultn), by=join_by(RES_CO_REG==CD_rAdm))
+
+# mrc
+djmaPopu_mrc <- left_join(djma_sum_rAdm %>% select(CD_rAdm, An, NOM_rAdm, sommeDJMA), mrc_cc_cov %>% select(CD_rAdm, CD_MRC, Popultn), by=join_by(CD_rAdm))
+
+vktPopu_mrc <- left_join(vkt_sum_rAdm %>% select(RES_CO_REG, ANNEE, RES_CO_REG, sommeVKT), mrc_cc_cov %>% select(CD_rAdm, CD_MRC, Popultn), by=join_by(RES_CO_REG==CD_rAdm))
+
+  # verif
+  # sum(djmaPopu_muncp$Popultn)/length(unique(djmaPopu_muncp$An))
+  # sum(vktPopu_muncp$Popultn)/length(unique(vktPopu_muncp$ANNEE))
+  # sum(djmaPopu_mrc$Popultn)/length(unique(djmaPopu_mrc$An))
+  # sum(vktPopu_mrc$Popultn)/length(unique(vktPopu_mrc$ANNEE))
+```
+
+## Mulitplier exposition et population
+```{r}
+# Fixer les régions sans population à 1 pour éviter des problèmes de log(0)
+djmaPopu_muncp[djmaPopu_muncp$Popultn==0,]$Popultn <- 1
+djmaPopu_mrc[djmaPopu_mrc$Popultn==0,]$Popultn <- 1
+vktPopu_muncp[vktPopu_muncp$Popultn==0,]$Popultn <- 1
+vktPopu_mrc[vktPopu_mrc$Popultn==0,]$Popultn <- 1
+
+# Calculer population de chaque région administrative
+djmaPopu_muncp <- djmaPopu_muncp %>% group_by(CD_rAdm, An) %>% mutate(popu_rA = sum(Popultn))
+djmaPopu_mrc <- djmaPopu_mrc %>% group_by(CD_rAdm, An) %>% mutate(popu_rA = sum(Popultn))
+vktPopu_muncp <- vktPopu_muncp %>% group_by(RES_CO_REG, ANNEE) %>% mutate(popu_rA = sum(Popultn))
+vktPopu_mrc <- vktPopu_mrc %>% group_by(RES_CO_REG, ANNEE) %>% mutate(popu_rA = sum(Popultn))
+
+  # verif
+   djmaPopu_muncp %>% distinct(CD_rAdm, An, .keep_all = TRUE) %>% .$popu_rA %>% sum()/length(unique(djmaPopu_muncp$An))
+    vktPopu_muncp %>% distinct(RES_CO_REG, ANNEE, .keep_all = TRUE) %>% .$popu_rA %>% sum()/length(unique(vktPopu_muncp$ANNEE))
+     djmaPopu_mrc %>% distinct(CD_rAdm, An, .keep_all = TRUE) %>% .$popu_rA %>% sum()/length(unique(djmaPopu_mrc$An))
+    vktPopu_mrc %>% distinct(RES_CO_REG, ANNEE, .keep_all = TRUE) %>% .$popu_rA %>% sum()/length(unique(vktPopu_mrc$ANNEE))
+    
+
+# Normalisation par population
+djmaPopu_muncp$djmaPopu <- djmaPopu_muncp$sommeDJMA*djmaPopu_muncp$Popultn/djmaPopu_muncp$popu_rA
+djmaPopu_mrc$djmaPopu <- djmaPopu_mrc$sommeDJMA*djmaPopu_mrc$Popultn/djmaPopu_mrc$popu_rA
+vktPopu_muncp$vktPopu <- vktPopu_muncp$sommeVKT*vktPopu_muncp$Popultn/vktPopu_muncp$popu_rA
+vktPopu_mrc$vktPopu <- vktPopu_mrc$sommeVKT*vktPopu_mrc$Popultn/vktPopu_mrc$popu_rA
+
+djmaPopu_muncp$An <- as.numeric(djmaPopu_muncp$An)
+djmaPopu_mrc$An <- as.numeric(djmaPopu_mrc$An)
+vktPopu_muncp$ANNEE <- as.numeric(vktPopu_muncp$ANNEE)
+vktPopu_mrc$ANNEE <- as.numeric(vktPopu_mrc$ANNEE)
+
+
+save(djmaPopu_muncp, file = file.path(pathTraitees, "djmaPopu_muncp.Rda"))
+save(djmaPopu_mrc, file = file.path(pathTraitees, "djmaPopu_mrc.Rda"))
+save(vktPopu_muncp, file = file.path(pathTraitees, "vktPopu_muncp.Rda"))
+save(vktPopu_mrc, file = file.path(pathTraitees, "vktPopu_mrc.Rda"))
+
+
+
+# ggplot() +
+#   geom_point(aes(x=(djmaPopu_muncp %>% filter(An>=2014))$djmaPopu, y=vktPopu_muncp$vktPopu))
+# 
+# ggplot() +
+#   geom_point(aes(x=(djmaPopu_mrc %>% filter(An>=2014))$djmaPopu, y=vktPopu_mrc$vktPopu))
+# 
+# 
+# sum(djmaPopu_muncp$djmaPopu)
+# djmaPopu_muncp %>% distinct(CD_rAdm, An, .keep_all = TRUE) %>% select(sommeDJMA) %>% sum()
+# 
+# sum(vktPopu_muncp$vktPopu)
+# vktPopu_muncp %>% distinct(RES_CO_REG, ANNEE, .keep_all = TRUE) %>% select(sommeVKT) %>% sum()
+# 
+# sum(djmaPopu_mrc$djmaPopu)
+# djmaPopu_mrc %>% distinct(CD_rAdm, An, .keep_all = TRUE) %>% select(sommeDJMA) %>% sum()
+# 
+# sum(vktPopu_mrc$vktPopu)
+# vktPopu_mrc %>% distinct(RES_CO_REG, ANNEE, .keep_all = TRUE) %>% select(sommeVKT) %>% sum()
+# # Petite différence provenant de je ne sais ou...
+
+```
+
+
+# CMM
+
+## Occupation du sol
+```{r}
+# Occupation du sol
+occ_66023 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66023-US-2022"), layer = "66023-US-2022")
+occ_66007 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66007-US-2022"), layer = "66007-US-2022")
+occ_66032 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66032-US-2022"), layer = "66032-US-2022")
+occ_66047 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66047-US-2022"), layer = "66047-US-2022")
+occ_66058 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66058-US-2022"), layer = "66058-US-2022")
+occ_66062 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66062-US-2022"), layer = "66062-US-2022")
+occ_66072 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66072-US-2022"), layer = "66072-US-2022")
+occ_66087 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66087-US-2022"), layer = "66087-US-2022")
+occ_66092 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66092-US-2022"), layer = "66092-US-2022")
+occ_66097 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66097-US-2022"), layer = "66097-US-2022")
+occ_66102 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66102-US-2022"), layer = "66102-US-2022")
+occ_66107 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66107-US-2022"), layer = "66107-US-2022")
+occ_66112 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66112-US-2022"), layer = "66112-US-2022")
+occ_66117 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66117-US-2022"), layer = "66117-US-2022")
+occ_66127 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66127-US-2022"), layer = "66127-US-2022")
+occ_66142 <- read_sf(dsn =file.path(pathBrutes, "CMM", "occ", "66142-US-2022"), layer = "66142-US-2022")
+
+occ <- rbind(occ_66023, occ_66007, occ_66032, occ_66047, occ_66058, occ_66062, occ_66072, occ_66087, occ_66092, occ_66097, occ_66102, occ_66107, occ_66112, occ_66117, occ_66127, occ_66142)
+occ <- st_transform(occ, crs = projUTM)
+
+occRes <- occ[occ$UTIL_SOL >= 100 & occ$UTIL_SOL < 200,]
+occIndComm <- occ[occ$UTIL_SOL == 200 | occ$UTIL_SOL == 400 | occ$UTIL_SOL == 300,]
+
+
+ram <- read_sf(dsn =file.path(pathBrutes, "CMM", "ram"), layer = "ram_cc13-028-13062013")
+ram <- st_transform(ram, crs = projUTM)
+
+save(occRes, file = file.path(pathTraitees, "occRes.Rda"))
+save(occIndComm, file = file.path(pathTraitees, "occIndComm.Rda"))
+save(ram, file = file.path(pathTraitees, "ram.Rda"))
+```
+
+
+
+
+
+
+
+
+
+
+
