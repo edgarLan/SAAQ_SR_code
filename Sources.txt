@@ -1,0 +1,22 @@
+Données accidents: Proviennent de la SAAQ directement, des données semblables peuvent être trouvées ici: https://www.donneesquebec.ca/recherche/dataset/decoupages-administratifs/resource/b368d470-71d6-40a2-8457-e4419de2f9c0
+	Différences: Accidents au niveau grave et mortel sont combinés
+		     Chaque rangée est un accident, alors que dans les données de la SAAQ, chaque rangée est un conducteur impliqué dans un accident.
+	data_acc
+	
+Données accidents Montréal: https://donnees.montreal.ca/dataset/collisions-routieres
+	collisions_routieres_MTL_SHP 
+
+Frontières administratives officielles québécoises : https://www.donneesquebec.ca/recherche/dataset/decoupages-administratifs/resource/b368d470-71d6-40a2-8457-e4419de2f9c0
+	municipalité: munic_s
+	mrc: mrc_s	
+	région administrative: regio_s
+		le "_s" est pour le type de géométrie, ici "surface".
+
+Débits et routes Québec: https://www.donneesquebec.ca/recherche/dataset/debit-de-circulation/resource/9de14998-2e3b-4936-a587-2da4f3ddd3af
+	Ajustements VKT Tarcisio: merged
+
+CMM: https://observatoire.cmm.qc.ca/produits/donnees-georeferencees
+	Utilisation du sol 2022 pour Montréal: Agglomération de Montréal 660-US-2022 - ZIP 54,63 Mo
+	Transport: Fichier numérique (ZIP 1,3 Mo)
+	
+	
